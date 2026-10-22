@@ -4,8 +4,14 @@
   "description": "Clean Architecture Autonomous AI Agent CLI",
   "main": "src/index.js",
   "scripts": {
-    "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts",
+    "start": "npm run start:dev",
+    "start:dev": "NODE_ENV=development tsx src/index.ts",
+    "dev": "NODE_ENV=development tsx watch src/index.ts",
+    "build": "tsc",
+    "start:prod": "npm run build && NODE_ENV=production node out/index.js",
+    "test": "npm run test:dev",
+    "test:dev": "NODE_ENV=development tsx --test src/infrastructure/cli/ui/terminal.renderer.test.ts src/infrastructure/ai/ollama-llm.adapter.test.ts src/infrastructure/persistence/file-recovery.store.test.ts",
+    "test:prod": "NODE_ENV=production tsx --test src/infrastructure/cli/ui/terminal.renderer.test.ts src/infrastructure/ai/ollama-llm.adapter.test.ts src/infrastructure/persistence/file-recovery.store.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [

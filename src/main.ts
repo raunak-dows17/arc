@@ -10,8 +10,12 @@ import { FileWriterTool } from "./infrastructure/tools/file_writer.tool.js";
 import { ListFilesTool } from "./infrastructure/tools/list-files.tool.js";
 import { WebSearchTool } from "./infrastructure/tools/web_search.tool.js";
 import { UndoFileWriteTool } from "./infrastructure/tools/undo-file-write.tool.js";
+import { agentLogger } from "./shared/logger/pino.logger.js";
 
 export async function bootstrap(): Promise<void> {
+  const cliArgs = process.argv.slice(2).join(" ").trim();
+  agentLogger.setInteractiveTerminal(!cliArgs);
+
   // 1. Initialize Infrastructure Adapters
   const llmProvider = LLMFactory.create();
   const vectorStore = new InMemoryVectorAdapter();
@@ -38,7 +42,6 @@ export async function bootstrap(): Promise<void> {
   const cliCommand = new RunAgentCommand(executeAgentLoopUseCase, renderer);
 
   // 5. Check if user passed a single command argument or wants Interactive Mode
-  const cliArgs = process.argv.slice(2).join(" ").trim();
   if (cliArgs) {
     await cliCommand.executeSingleObjective(cliArgs);
   } else {
