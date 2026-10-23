@@ -52,7 +52,7 @@ const sessionFileSchema = z.object({
 });
 
 /**
- * JSON transcript storage inside AGENT_HOME/sessions. Writes are atomic
+ * JSON transcript storage inside ARC_HOME/sessions. Writes are atomic
  * (temp file + rename).
  */
 export class JsonSessionStore implements SessionStorePort {
@@ -186,7 +186,7 @@ export class JsonSessionStore implements SessionStorePort {
         at: message.at,
         ...(message.toolName !== undefined ? { toolName: message.toolName } : {}),
       })),
-      agentId: data.agentId ?? "assistant",
+      agentId: data.agentId === "assistant" ? "arc" : (data.agentId ?? "arc"),
       parentId: data.parentId ?? null,
       depth: data.depth ?? 0,
       summary: data.summary

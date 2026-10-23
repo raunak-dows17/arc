@@ -10,7 +10,7 @@ import {
 
 /**
  * Scans SKILL.md files from lowest to highest precedence:
- *   <repo>/skills → AGENT_HOME/skills → WORKSPACE/.skills
+ *   <repo>/skills → ARC_HOME/skills → WORKSPACE/.skills
  * A later skill with the same name replaces an earlier one.
  */
 export class MarkdownSkillRepository implements SkillRepositoryPort {

@@ -25,7 +25,7 @@ export interface ChatReplDeps {
   runAgentTurn: RunAgentTurnUseCase;
   renderer: TerminalRenderer;
   modelName: string;
-  agentHome: string;
+  arcHome: string;
   defaultProfileId: string;
   profiles: AgentProfileRepositoryPort;
   skills: SkillRepositoryPort;
@@ -81,7 +81,7 @@ export class ChatRepl {
       sandbox: this.deps.sandbox.root,
       sessionId: this.session.id,
       resumed: Boolean(resumed),
-      agentHome: this.deps.agentHome,
+      arcHome: this.deps.arcHome,
       profile: this.session.agentId,
     });
 
@@ -262,7 +262,7 @@ export class ChatRepl {
             profile,
             model: this.deps.modelName,
             workspace: this.deps.sandbox.root,
-            agentHome: this.deps.agentHome,
+            arcHome: this.deps.arcHome,
             sessionId: session.id,
             depth: session.depth,
             messageCount: session.messages.length,
@@ -437,7 +437,7 @@ export class ChatRepl {
 
       case "/model":
         this.deps.renderer.info(
-          `Model: ${this.deps.modelName} (configure OLLAMA_MODEL in .env)`,
+          `Model: ${this.deps.modelName} (configure ARC_MODEL in .env)`,
         );
         if (argument) {
           this.deps.renderer.warn(

@@ -11,6 +11,8 @@ export interface LlmRequest {
   systemPrompt: string;
   messages: readonly LlmMessage[];
   tools: readonly ToolDefinition[];
+  /** Optional model override selected by the application-level router. */
+  model?: string;
   signal?: AbortSignal;
 }
 
@@ -32,6 +34,13 @@ export interface TextGenerationResult {
   usage: LlmUsage;
 }
 
+export interface TextGenerationOptions {
+  systemPrompt?: string;
+  /** Optional model override selected by the application-level router. */
+  model?: string;
+  signal?: AbortSignal;
+}
+
 /**
  * Plain-text completion used for context compaction. It is separate from the
  * structured decision channel so the two can be tested independently.
@@ -39,6 +48,6 @@ export interface TextGenerationResult {
 export interface TextGenerationPort {
   generateText(
     prompt: string,
-    options?: { systemPrompt?: string; signal?: AbortSignal },
+    options?: TextGenerationOptions,
   ): Promise<TextGenerationResult>;
 }

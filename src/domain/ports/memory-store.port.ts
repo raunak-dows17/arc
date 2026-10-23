@@ -14,7 +14,7 @@ export interface MemorySearchResult {
 }
 
 export interface MemoryStorePort {
-  /** Create AGENT_HOME/memory and default Markdown files if needed. */
+  /** Create ARC_HOME/memory and default Markdown files if needed. */
   initialize(): Promise<void>;
   readCore(now?: Date): Promise<MemoryCore>;
   appendDaily(entry: string, now?: Date): Promise<{ path: string; bytes: number }>;

@@ -14,6 +14,7 @@ import { createSessionId } from "../../shared/id.js";
 import { errorMessage, truncateText } from "../../shared/text.js";
 import type { LLMPort } from "../../domain/ports/llm.port.js";
 import type { ContextAssembler } from "../services/context-assembler.js";
+import type { ModelRouter } from "../services/model-router.js";
 import type { ToolRegistry } from "../services/tool-registry.js";
 import type { CompactSessionUseCase } from "./compact-session.usecase.js";
 import type { ExecuteToolUseCase } from "./execute-tool.usecase.js";
@@ -45,6 +46,7 @@ export class SubAgentRunner implements SubAgentRunnerPort {
       assembler: ContextAssembler;
       compacter?: CompactSessionUseCase;
       events?: EventBusPort;
+      modelRouter?: ModelRouter;
     },
     private readonly options: SubAgentRunnerOptions,
   ) {
@@ -55,6 +57,7 @@ export class SubAgentRunner implements SubAgentRunnerPort {
       assembler: deps.assembler,
       ...(deps.compacter ? { compacter: deps.compacter } : {}),
       ...(deps.events ? { events: deps.events } : {}),
+      ...(deps.modelRouter ? { modelRouter: deps.modelRouter } : {}),
     });
   }
 

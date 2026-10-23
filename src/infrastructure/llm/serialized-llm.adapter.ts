@@ -1,21 +1,32 @@
 import type {
+  DecisionModelPort,
+  DecisionRequest,
+  DecisionResult,
+} from "../../domain/ports/decision-model.port.js";
+import type {
   LLMPort,
   LlmDecisionResult,
   LlmRequest,
+  TextGenerationOptions,
   TextGenerationPort,
   TextGenerationResult,
 } from "../../domain/ports/llm.port.js";
+import { DecisionModelError } from "../../domain/errors/agent.errors.js";
 
 /**
  * Local models are memory-heavy and Ollama handles concurrent requests poorly
  * on a 16 GB machine. This decorator funnels every model call through a single
- * promise chain so the parent turn and any sub-agent never inference at once.
+ * promise chain so the parent turn, sub-agents, and the decision model never
+ * inference at once.
  */
-export class SerializedLlmAdapter implements LLMPort, TextGenerationPort {
+export class SerializedLlmAdapter
+  implements LLMPort, TextGenerationPort, DecisionModelPort
+{
   private tail: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly inner: LLMPort & TextGenerationPort,
+    private readonly decisionModel?: DecisionModelPort,
   ) {}
 
   generateDecision(request: LlmRequest): Promise<LlmDecisionResult> {
@@ -27,11 +38,23 @@ export class SerializedLlmAdapter implements LLMPort, TextGenerationPort {
 
   generateText(
     prompt: string,
-    options?: { systemPrompt?: string; signal?: AbortSignal },
+    options?: TextGenerationOptions,
   ): Promise<TextGenerationResult> {
     return this.enqueue(() => {
       options?.signal?.throwIfAborted();
       return this.inner.generateText(prompt, options);
+    });
+  }
+
+  ask(request: DecisionRequest): Promise<DecisionResult> {
+    return this.enqueue(() => {
+      request.signal?.throwIfAborted();
+      if (!this.decisionModel) {
+        throw new DecisionModelError(
+          "No decision model is configured. Install Ollama 0.35+ and pull tev1:0.8b.",
+        );
+      }
+      return this.decisionModel.ask(request);
     });
   }
 

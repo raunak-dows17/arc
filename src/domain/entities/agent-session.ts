@@ -83,7 +83,7 @@ export class AgentSession {
       updatedAt: timestamp,
       status: "active",
       messages: [],
-      agentId: options.agentId ?? "assistant",
+      agentId: options.agentId ?? "arc",
       parentId: options.parentId ?? null,
       depth: options.depth ?? 0,
       summary: null,

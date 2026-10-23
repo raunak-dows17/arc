@@ -34,7 +34,7 @@ const runSchema = z.object({
   usage: usageSchema,
 });
 
-/** Atomic JSON storage for sub-agent run records under AGENT_HOME/runs. */
+/** Atomic JSON storage for sub-agent run records under ARC_HOME/runs. */
 export class JsonSubAgentRepository implements SubAgentRepositoryPort {
   constructor(private readonly directory: string) {}
 

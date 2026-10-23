@@ -1,31 +1,43 @@
 {
-  "name": "local-autonomous-agent",
+  "name": "arc",
   "version": "0.1.0",
   "private": true,
-  "description": "Local-first autonomous agent CLI powered by Ollama and qwen3:8b",
+  "description": "ARC — Autonomous Regenerative Companion, a local-first agent powered by Ollama",
   "type": "module",
   "main": "out/main.js",
+  "bin": {
+    "arc": "out/main.js"
+  },
+  "files": [
+    "out",
+    "skills",
+    "README.md"
+  ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
+    "arc": "tsx src/main.ts",
     "start": "tsx src/main.ts",
     "dev": "tsx watch src/main.ts",
     "build": "tsc",
     "start:prod": "node out/main.js",
+    "doctor": "tsx src/main.ts doctor",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/application/context-builder.test.ts src/application/context-assembler.test.ts src/application/compact-session.usecase.test.ts src/application/execute-tool.usecase.test.ts src/application/run-agent-turn.usecase.test.ts src/application/sub-agent-runner.test.ts src/infrastructure/security/path-policy.test.ts src/infrastructure/config/env.test.ts src/infrastructure/sandbox/node-fs-sandbox.adapter.test.ts src/infrastructure/tools/file-tools.test.ts src/infrastructure/tools/load-skill.tool.test.ts src/infrastructure/persistence/json-session.store.test.ts src/infrastructure/persistence/json-session.store.v2.test.ts src/infrastructure/profiles/markdown-profile.repository.test.ts src/infrastructure/skills/markdown-skill.repository.test.ts src/infrastructure/memory/file-memory.store.test.ts src/infrastructure/events/events.test.ts src/infrastructure/llm/serialized-llm.adapter.test.ts src/infrastructure/llm/decision.schema.test.ts",
+    "test": "tsx --test src/application/context-builder.test.ts src/application/context-assembler.test.ts src/application/approval.service.test.ts src/application/compact-session.usecase.test.ts src/application/execute-tool.usecase.test.ts src/application/model-router.test.ts src/application/run-agent-turn.usecase.test.ts src/application/sub-agent-runner.test.ts src/infrastructure/security/path-policy.test.ts src/infrastructure/security/portable-path.test.ts src/infrastructure/config/env.test.ts src/infrastructure/sandbox/node-fs-sandbox.adapter.test.ts src/infrastructure/tools/file-tools.test.ts src/infrastructure/tools/load-skill.tool.test.ts src/infrastructure/persistence/json-session.store.test.ts src/infrastructure/persistence/json-session.store.v2.test.ts src/infrastructure/profiles/markdown-profile.repository.test.ts src/infrastructure/skills/markdown-skill.repository.test.ts src/infrastructure/memory/file-memory.store.test.ts src/infrastructure/events/events.test.ts src/infrastructure/llm/serialized-llm.adapter.test.ts src/infrastructure/llm/decision.schema.test.ts src/infrastructure/llm/ollama-decision.adapter.test.ts src/infrastructure/secrets/napi-keyring.secret-store.test.ts src/application/doctor.usecase.test.ts",
     "ollama:check": "curl -s http://127.0.0.1:11434/api/tags"
   },
   "keywords": [
-    "agent",
+    "arc",
+    "autonomous",
+    "regenerative",
+    "companion",
     "ollama",
-    "qwen3",
-    "cli",
-    "clean-architecture"
+    "local-first"
   ],
   "license": "MIT",
   "dependencies": {
+    "@napi-rs/keyring": "^2.1.2",
     "dotenv": "^18.0.9",
     "minisearch": "^7.2.0",
     "picocolors": "^1.1.1",

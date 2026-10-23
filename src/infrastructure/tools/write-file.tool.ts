@@ -33,6 +33,8 @@ export class WriteFileTool implements ToolPort {
         required: ["path", "content"],
         additionalProperties: false,
       },
+      risk: "workspace-write",
+      requiresApproval: false,
     };
   }
 

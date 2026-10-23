@@ -1,19 +1,25 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { AgentProfile } from "../domain/entities/agent-profile.js";
+import type { ApprovalPort } from "../domain/ports/approval.port.js";
 import type { ToolDefinition, ToolPort } from "../domain/ports/tool.port.js";
 import { ToolCall } from "../domain/value-objects/tool-call.js";
 import { ToolRegistry } from "./services/tool-registry.js";
 import { ExecuteToolUseCase } from "./usecases/execute-tool.usecase.js";
 
 class NamedTool implements ToolPort {
-  constructor(private readonly name: string) {}
+  constructor(
+    private readonly name: string,
+    private readonly requiresApproval = false,
+  ) {}
 
   getDefinition(): ToolDefinition {
     return {
       name: this.name,
       description: `${this.name} tool`,
       parameters: { type: "object" },
+      risk: "shell",
+      requiresApproval: this.requiresApproval,
     };
   }
 
@@ -118,6 +124,50 @@ describe("ExecuteToolUseCase profile policy", () => {
       const outcome = await execute.execute(call, undefined, assistant);
       assert.equal(outcome.ok, true, outcome.observation);
     }
+  });
+
+  it("fails closed when approval is required but unavailable", async () => {
+    const registry = new ToolRegistry();
+    registry.register(new NamedTool("shell", true));
+    const execute = new ExecuteToolUseCase(registry);
+
+    const outcome = await execute.execute(
+      ToolCall.create("shell", { command: "npm test" }),
+      undefined,
+      profile({ tools: "*", readOnly: false }),
+    );
+
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.observation, /requires human approval/);
+  });
+
+  it("runs an approved tool and blocks a denied tool", async () => {
+    const registry = new ToolRegistry();
+    registry.register(new NamedTool("shell", true));
+    let approve = true;
+    const approval: ApprovalPort = {
+      async request() {
+        return { approved: approve, decidedBy: "test" };
+      },
+    };
+    const execute = new ExecuteToolUseCase(registry, approval);
+    const call = ToolCall.create("shell", { command: "npm test" });
+
+    const approved = await execute.execute(
+      call,
+      { sessionId: "s", agentId: "arc", depth: 0, channel: "cli" },
+      profile({ tools: "*", readOnly: false }),
+    );
+    assert.equal(approved.ok, true);
+
+    approve = false;
+    const denied = await execute.execute(
+      call,
+      { sessionId: "s", agentId: "arc", depth: 0, channel: "telegram" },
+      profile({ tools: "*", readOnly: false }),
+    );
+    assert.equal(denied.ok, false);
+    assert.match(denied.observation, /Approval denied/);
   });
 
   it("returns unknown tools as recoverable observations", async () => {

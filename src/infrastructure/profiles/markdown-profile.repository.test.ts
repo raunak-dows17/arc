@@ -43,10 +43,11 @@ describe("MarkdownAgentProfileRepository", () => {
   });
 
   it("loads built-in profiles and applies user overrides", async () => {
-    const assistant = await profiles.get("assistant");
-    assert.ok(assistant);
-    assert.equal(assistant.builtIn, true);
-    assert.equal(assistant.canSpawn, true);
+    const arc = await profiles.get("arc");
+    assert.ok(arc);
+    assert.equal(arc.builtIn, true);
+    assert.equal(arc.canSpawn, true);
+    assert.match(arc.description, /Autonomous Regenerative Companion/);
 
     const researcher = await profiles.get("researcher");
     assert.ok(researcher);
@@ -61,7 +62,7 @@ describe("MarkdownAgentProfileRepository", () => {
   it("lists the full catalogue and ignores malformed files", async () => {
     const all = await profiles.list();
     const ids = all.map((profile) => profile.id);
-    assert.ok(ids.includes("assistant"));
+    assert.ok(ids.includes("arc"));
     assert.ok(ids.includes("reviewer"));
     assert.ok(ids.includes("writer"));
     assert.ok(!ids.includes("broken"));

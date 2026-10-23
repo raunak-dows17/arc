@@ -22,7 +22,7 @@ export interface BannerInput {
   sandbox: string;
   sessionId: string;
   resumed: boolean;
-  agentHome: string;
+  arcHome: string;
   profile: string;
 }
 
@@ -30,7 +30,7 @@ export interface StatusInput {
   profile: AgentProfile;
   model: string;
   workspace: string;
-  agentHome: string;
+  arcHome: string;
   sessionId: string;
   depth: number;
   messageCount: number;
@@ -83,11 +83,11 @@ export class TerminalRenderer {
 
   banner(input: BannerInput): void {
     console.log();
-    console.log(`  ${bold(cyan("Local Autonomous Agent"))}`);
+    console.log(`  ${bold(cyan("ARC — Autonomous Regenerative Companion"))}`);
     console.log(dim(`  profile  ${input.profile}`));
     console.log(dim(`  model    ${input.model}`));
     console.log(dim(`  workspace ${input.sandbox}`));
-    console.log(dim(`  home     ${input.agentHome}`));
+    console.log(dim(`  arc home ${input.arcHome}`));
     console.log(
       dim(
         `  session  ${input.sessionId}${input.resumed ? " (resumed)" : ""}`,
@@ -248,7 +248,7 @@ export class TerminalRenderer {
     this.field("profile", `${input.profile.id} · ${input.profile.description}`);
     this.field("model", input.model);
     this.field("workspace", input.workspace);
-    this.field("agent home", input.agentHome);
+    this.field("arc home", input.arcHome);
     this.field(
       "session",
       `${input.sessionId}${input.depth > 0 ? ` · depth ${input.depth}` : ""} · ${input.messageCount} messages`,

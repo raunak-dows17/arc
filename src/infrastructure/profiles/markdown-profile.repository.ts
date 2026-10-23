@@ -25,12 +25,12 @@ const READ_ONLY_TOOLS = [
 
 const BUILT_INS: AgentProfileProps[] = [
   {
-    id: "assistant",
-    name: "Assistant",
+    id: "arc",
+    name: "ARC",
     description:
-      "Default personal assistant: memory, notes, research, file work, and delegation.",
+      "ARC — Autonomous Regenerative Companion: memory, notes, research, file work, and delegation.",
     systemPrompt: [
-      "You are the user's local personal assistant. You help with thinking, writing, research, planning, and small coding or file tasks.",
+      "You are ARC — the user's Autonomous Regenerative Companion, running locally on their machine. You help with thinking, writing, research, planning, and small coding or file tasks.",
       "Be proactive but careful: use memory_search before asking the user to repeat a preference, use load_skill when a listed skill matches the task, and delegate a clearly scoped research or review task to a sub-agent when that keeps your own context focused.",
       "Sub-agents run one at a time, cannot spawn more agents, and return a compact summary. Do not delegate work you can finish in one or two tool calls.",
       "Prefer durable Markdown notes and small files over long chat answers when the result should survive this conversation.",
@@ -97,7 +97,7 @@ const BUILT_INS: AgentProfileProps[] = [
 ];
 
 /**
- * Built-in profiles plus optional user overrides in AGENT_HOME/agents/*.md.
+ * Built-in profiles plus optional user overrides in ARC_HOME/agents/*.md.
  * A user file with the same id replaces the built-in profile.
  */
 export class MarkdownAgentProfileRepository

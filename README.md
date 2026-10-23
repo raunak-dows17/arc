@@ -1,310 +1,276 @@
-# Local Autonomous Agent
+# ARC — Autonomous Regenerative Companion
 
-A local-first autonomous assistant CLI powered by **Ollama** and **`qwen3:8b`**, written in TypeScript with clean architecture. It keeps Markdown memory, loads skills on demand, runs a bounded tool loop, and delegates self-contained work to sequential sub-agents — all without cloud LLM calls.
+ARC is a free, local-first companion agent for a Windows 11 laptop. It runs
+entirely on local **Ollama** models, keeps durable Markdown memory, loads
+skills on demand, delegates bounded work to sequential sub-agents, and is
+designed around explicit approval boundaries for anything that leaves the
+machine.
 
-Tuned for a **16 GB RAM** machine. `qwen3:8b` is the recommended maximum model size.
+- **Production runtime:** Windows 11, 16 GB RAM, AMD iGPU with 4 GB dedicated
+  memory.
+- **Development runtime:** macOS. Windows-specific path and credential
+  behaviour is tested on macOS from day one.
+- **No cloud LLM calls.** Models are selected from the local Ollama instance.
+- **Read-only by default for the outside world.** Social analysis and email
+  ingestion will never post, reply, delete, or mark messages read. Email is
+  read + notify only.
+- **Free-first integrations.** Official APIs and free tiers, cached where
+  possible.
+
+> **Current milestone: Phase 3 — ARC foundation.** Chat, memory, skills,
+> sub-agents, model routing, Tev1 decision-model support, the approval
+> boundary, OS credential storage, Windows-safe paths, and `arc doctor` are in
+> place. Web search, coding tools, PowerShell, email, social analysis,
+> Telegram, and the always-on scheduler are the next phases.
 
 ## Requirements
 
-- Node.js 20+ (tested on Node 26)
-- [Ollama](https://ollama.com) running locally
-- The Qwen3 8B model:
+- Node.js 20 or newer
+- [Ollama](https://ollama.com) 0.35 or newer for the decision-model endpoint
+- Local models:
 
 ```bash
 ollama pull qwen3:8b
-ollama serve
+ollama pull qwen2.5-coder:7b
+ollama pull tev1:0.8b
 ```
 
-## Setup
+`qwen3:8b` is the recommended maximum generative model for 16 GB RAM.
+`tev1:0.8b` is a small pre-classifier, not a chat model or tool-call
+generator.
+
+## Quick start
 
 ```bash
 npm install
+cp .env.example .env
+npm run doctor
 npm start
 ```
 
-The defaults work without a `.env` file. To customise:
+`npm run doctor` checks Node, private-state separation, Ollama, installed
+models, the OS keyring, memory, and disk without running inference.
+
+Once built, the package exposes an `arc` command:
 
 ```bash
-cp .env.example .env
+npm run build
+npm link          # optional, makes `arc` available on your PATH
+arc doctor
+arc
 ```
+
+On Windows, run the same commands from PowerShell. The production paths should
+look like this in `.env`:
+
+```dotenv
+ARC_HOME=C:\Users\Raunak Pandey\AppData\Local\ARC\agent-home
+ARC_WORKSPACE=C:\Users\Raunak Pandey\Projects
+ARC_PROFILE=arc
+```
+
+`ARC_HOME` must stay outside `ARC_WORKSPACE`. If it does not, ARC refuses to
+start because private memory, sessions, and audit logs would become visible to
+file tools.
+
+## Commands
+
+Inside the REPL:
+
+| Command | Purpose |
+| --- | --- |
+| `/help` | Show commands |
+| `/new [profile]` | Start a fresh session |
+| `/sessions` | List saved sessions |
+| `/history [id]` | Show recent messages |
+| `/status` | Profile, paths, usage, and context estimate |
+| `/tools` | List tools allowed for the current profile |
+| `/sandbox [path]` | Show the workspace and a directory listing |
+| `/memory` | Show `USER.md`, `MEMORY.md`, and recent daily notes |
+| `/search <query>` | Search Markdown memory |
+| `/remember [daily] <text>` | Save a durable note |
+| `/skills`, `/skill <name>` | List or inspect skills |
+| `/agents` | List profiles |
+| `/agent <name> <task>` | Run a sub-agent directly |
+| `/tasks`, `/task <id>` | Inspect sub-agent runs |
+| `/compact` | Summarize older history now |
+| `/cancel` | Cancel the running turn |
+| `/model` | Show the configured main model |
+
+Anything else is sent to ARC as a task.
+
+## Models and routing
+
+| Role | Default | Notes |
+| --- | --- | --- |
+| Main / research | `qwen3:8b` | General reasoning, writing, memory, tool calls |
+| Coding | `qwen2.5-coder:7b` | Coding profiles and coding tasks |
+| Decision pre-classifier | `tev1:0.8b` | Ollama `/v1/systemone`; yes/no, choice, score |
+| Compaction | main model | Summarizes old transcript history |
+
+The model router selects a model by task/profile. `SerializedLlmAdapter`
+guarantees that only one generative or decision-model request runs at a time,
+including parent turns, sub-agents, and future email watchers. This matters on
+a 16 GB machine.
+
+Tev1 is deliberately **not** used to generate tool calls. It answers named
+questions about a state, for example “does this email need attention?” or “is
+this a billing, scheduling, or personal message?” Uncertain decisions should be
+escalated to the main model.
+
+Recommended Ollama service limits:
+
+```text
+OLLAMA_MAX_LOADED_MODELS=1
+OLLAMA_NUM_PARALLEL=1
+```
+
+If `qwen2.5-coder:7b` spills to shared memory, lower `ARC_NUM_CTX` from 8192 to
+4096 first.
 
 ## Two separate directories
 
-The agent has private state and a filesystem workspace. Keeping them apart means memory and session logs never become visible to file tools.
-
 | Path | Default | Purpose |
 | --- | --- | --- |
-| `AGENT_HOME` | `./.agent-home` | Private memory, skills, profiles, sessions, run records, audit log |
-| `WORKSPACE_DIR` | `./sandbox` | The only filesystem world exposed to `list_files`, `read_file`, and `write_file` |
+| `ARC_HOME` | `./.arc` on macOS; `%LOCALAPPDATA%\ARC\agent-home` on Windows | Private memory, skills, profiles, sessions, run records, audit log |
+| `ARC_WORKSPACE` | `./sandbox` | The only filesystem world exposed to file tools |
 
-`SANDBOX_DIR` is still accepted as a legacy alias for `WORKSPACE_DIR`. Existing transcripts in `sandbox/.agent/sessions` are copied once into `AGENT_HOME/sessions` when the new store is empty.
+A tighter production layout is the user's Projects folder as the workspace
+and `%LOCALAPPDATA%\ARC\agent-home` as private state. Workspace writes are
+intended to be auto-allowed inside the active-project boundary; anything
+outside it, or any sensitive path, is blocked.
 
-```text
-.agent-home/
-  STANDING_ORDERS.md
-  agents/                 # optional user profiles: <id>.md
-  skills/                 # optional user skills: <name>/SKILL.md
-  memory/
-    USER.md
-    MEMORY.md
-    daily/YYYY-MM-DD.md
-  sessions/               # full transcripts (JSON v2)
-  runs/                   # sub-agent run records
-  audit.jsonl             # event audit trail
-```
+Legacy names are still accepted during migration: `AGENT_HOME`,
+`AGENT_PROFILE`, `WORKSPACE_DIR`, `SANDBOX_DIR`, and `OLLAMA_*` variables.
+ARC-prefixed names win when both are present.
 
-## Usage
+## Security model
 
-```text
-  Local Autonomous Agent
-  profile  assistant
-  model    qwen3:8b
-  workspace /path/to/project/sandbox
-  home     /path/to/project/.agent-home
-  session  20261023T100304Z-89e582ca
-  /help for commands · Ctrl+C cancels a running turn · Ctrl+D exits
+ARC assumes the model can make mistakes or be manipulated by content it reads.
 
-› create notes/plan.md with a short weekly plan, then read it back
-```
+- **Path policy:** sensitive paths such as `.env`, `secrets/`, `.git/config`,
+  private keys, and SSH material are blocked even if they appear inside the
+  workspace.
+- **Portable path validation:** drive-letter paths, UNC/device paths, alternate
+  data streams (`file.txt:stream`), reserved Windows device names, and
+  trailing-dot/space segments are rejected on every platform.
+- **Sandbox:** reads and writes resolve through symlink checks and must stay
+  inside the workspace. `.agent` and `.arc` directories inside the workspace
+  are reserved and hidden.
+- **Approval boundary:** tools marked `requiresApproval` fail closed unless a
+  human approves. Timeouts and cancellation become denials. The interactive
+  CLI and Telegram approval prompts are wired in the next phase; shell is not
+  available until then.
+- **Secrets:** use the Windows Credential Manager through the keyring adapter;
+  never put tokens in `.env`, memory, prompts, or audit logs. `arc doctor`
+  performs a set/read/delete probe.
+- **Audit:** events are written as JSONL under `ARC_HOME/audit.jsonl` with
+  sensitive keys redacted.
+- **Telegram:** bot chat is not end-to-end encrypted. Send summaries and
+  notifications, not full email bodies or secrets.
 
-Anything that does not start with `/` is sent to the agent as a task.
+## Windows 11 always-on setup
 
-### Commands
+ARC is designed to run at user logon, non-admin, under the same Windows account
+that owns the Credential Manager entries.
 
-| Command | Description |
-| --- | --- |
-| `/help` | Show all commands |
-| `/new [profile]` | Start a new session, optionally with an agent profile |
-| `/sessions` | List saved root and child sessions |
-| `/history [id]` | Show recent messages for the current session or a child id |
-| `/status` | Profile, paths, usage, and context estimate |
-| `/tools` | List tools available to the current profile |
-| `/memory` | Show `USER.md`, `MEMORY.md`, and recent daily notes |
-| `/search <query>` | Keyword-search Markdown memory |
-| `/remember [daily] <text>` | Save a durable memory note |
-| `/skills` | List installed skills |
-| `/skill <name>` | Show a skill body |
-| `/skill reload` | Re-scan skill directories |
-| `/agents` | List agent profiles |
-| `/agent <name> <task>` | Run a sub-agent directly |
-| `/tasks` | List sub-agent runs for this session |
-| `/task <id>` | Show one run, its status, and summary |
-| `/compact` | Summarize older history now |
-| `/cancel` | Cancel the running turn (Ctrl+C also works) |
-| `/sandbox [path]` | Show the workspace and a directory listing |
-| `/model` | Show the configured model |
-| `/exit` | Quit (Ctrl+D also works) |
+1. Install Node 20+ and Ollama.
+2. Put the source at `C:\Users\Raunak Pandey\Projects\arc`.
+3. Create `.env` with the production `ARC_HOME` and `ARC_WORKSPACE` above.
+4. Run `npm install`, `npm run build`, and `npm run doctor`.
+5. Create a Task Scheduler task triggered **At log on**, with
+   `node C:\Users\Raunak Pandey\Projects\arc\out\main.js` as the action and the
+   project folder as the start-in directory.
+6. Keep the user session logged in and locked.
+7. Disable sleep and hibernation while on AC power.
+8. Verify `arc doctor` after a reboot.
 
-Ctrl+C cancels the running turn without exiting. Press it twice on an idle prompt to exit.
-
-## Agent profiles
-
-Profiles isolate context and enforce least privilege. Built-ins:
-
-| Profile | Tools | Steps | Can spawn | Purpose |
-| --- | --- | --- | --- | --- |
-| `assistant` | all | 12 | yes | Default assistant: memory, notes, research, files, delegation |
-| `researcher` | read-only + memory + skills | 8 | no | Investigation and synthesis |
-| `reviewer` | read-only + memory + skills | 8 | no | Critical review |
-| `writer` | read-only + `write_file` + skills | 8 | no | Drafting and editing files |
-
-Override or add profiles with Markdown files in `AGENT_HOME/agents/<id>.md`:
-
-```markdown
----
-name: planner
-description: Weekly planning and prioritisation
-tools: [list_files, read_file, memory_search, memory_get, load_skill, write_file]
-skills: "*"
-maxSteps: 8
-canSpawn: false
-memoryWrite: false
-readOnly: false
----
-
-You are a pragmatic planner. Turn goals into a small, ordered plan.
-```
-
-A user file with the same id replaces the built-in profile. User profiles default to a safe, read-only tool set unless tools are listed.
-
-## Skills
-
-Skills are lazy-loaded instruction packages. The system prompt contains only the name, description, and "when to use" hint; the body enters context only when the model calls `load_skill`.
-
-Skill directories are merged in this order, with later directories overriding earlier ones by name:
-
-1. `<repo>/skills` (bundled)
-2. `AGENT_HOME/skills`
-3. `WORKSPACE_DIR/.skills`
-
-Format:
-
-```markdown
----
-name: research-brief
-description: Produce a decision-ready brief from local material.
-whenToUse: The user asks for research or a comparison.
-agents: "*"            # or [assistant, researcher]
-tools: [memory_search, read_file]
----
-
-Instructions...
-```
-
-Bundled skills: `daily-review`, `meeting-notes`, and `research-brief`.
-
-## Markdown memory
-
-Memory is plain Markdown, editable by the user at any time:
-
-- `USER.md` — stable preferences and facts about the user.
-- `MEMORY.md` — durable decisions and notes, appended by `remember`.
-- `daily/YYYY-MM-DD.md` — dated notes; successful turns are auto-captured by default.
-
-Retrieval uses **MiniSearch** keyword scoring, not embeddings, which keeps the memory budget for the model itself. Daily notes for today and yesterday are included in context, with per-file character caps and a total `MAX_MEMORY_CHARS` budget.
-
-## Sequential sub-agents
-
-`run_agent` delegates one self-contained task to a bounded profile. The parent turn blocks until the child finishes, so only one model request is ever in flight on the 16 GB machine.
-
-- Depth defaults to 1; children cannot spawn more agents.
-- Profiles with `canSpawn: true` cannot be used as children.
-- Each child gets an isolated transcript, its own profile and tool allowlist, and a compact summary return.
-- The child's full transcript is stored as a normal session (`parentId`, `depth`), and the run is stored in `AGENT_HOME/runs` for `/tasks`.
-- Per-turn delegation is capped by `MAX_SUBAGENTS_PER_TURN` (default 2) and each run by `MAX_SUBAGENT_RUN_MS` (default 5 minutes).
-
-## Context compaction
-
-The full transcript stays on disk. Before a turn, if the working transcript exceeds ~70% of `MAX_CONTEXT_CHARS`, older messages are replaced by a model-written summary. The newest `KEEP_RECENT_MESSAGES` messages stay verbatim. `/compact` forces it. Failed compaction never fails the turn; normal history trimming still bounds the request.
-
-## Security and safety
-
-- Workspace paths are jailed, with traversal, absolute-path, and symlink-escape checks.
-- Sensitive paths are denied for reads, writes, and listings: `.env*`, `secrets/`, `.git/`, private keys, and SSH material.
-- Writes are auto-allowed inside the workspace; there is no shell or network tool in this milestone. When those tools are added, they must go through an approval gate.
-- The reserved `.agent` state directory is blocked inside the workspace.
-- Tool calls are validated with Zod; observations are truncated; consecutive duplicate calls are blocked.
-- Child profiles are enforced in both the prompt and the dispatcher, not just by instructions.
-- `audit.jsonl` records turn, tool, memory-write, and sub-agent events. Tool arguments/results are truncated and sensitive keys are redacted.
-
-There is intentionally **no shell execution, delete, web browsing, browser automation, channels, cron/heartbeat, Docker sandboxing, embeddings, or UI** in this milestone.
-
-## Agent loop
-
-1. Append the user prompt to the session.
-2. Compact older history if needed.
-3. Assemble a bounded context: profile instructions, standing orders, memory, skill index, tool schemas, and recent history.
-4. Ask Ollama for a constrained JSON decision:
-
-   ```json
-   { "thought": "...", "tool": { "name": "read_file", "args": {} }, "final": null }
-   ```
-
-   or
-
-   ```json
-   { "thought": "...", "tool": null, "final": "the answer" }
-   ```
-
-5. Two mutually exclusive `anyOf` branches prevent the model from setting both `tool` and `final`.
-6. Validate and execute one tool; append the observation and continue.
-7. Record token usage, enforce step/delegation budgets, and abort cleanly on Ctrl+C.
-
-## Architecture
-
-```text
-src/
-  domain/
-    entities/          agent-session, agent-profile, skill, sub-agent-run
-    events/            typed agent events
-    services/          sensitive-path policy
-    value-objects/     decision, tool call
-    ports/             LLM, tools, sandbox, stores, memory, skills, profiles, runner
-    errors/
-  application/
-    usecases/          run-agent-turn, execute-tool, compact-session, sub-agent-runner
-    services/          context assembler, system prompt, tool registry, policy sandbox
-  infrastructure/
-    bootstrap/         AGENT_HOME creation and legacy-session migration
-    llm/               Ollama adapter, decision schema, serialized adapter
-    memory/            Markdown memory store, MiniSearch, standing orders
-    skills/            SKILL.md repository
-    profiles/          built-in + Markdown profile repository
-    sandbox/           filesystem jail
-    persistence/       session v2 and run-record JSON stores
-    events/            in-memory event bus and JSONL audit
-    tools/             file, memory, skill, remember, run_agent
-    cli/               REPL and terminal renderer
-    config/env.ts
-  main.ts              composition root
-```
-
-Dependency direction is inward. The domain has no Node.js, filesystem, network, or CLI imports. Infrastructure implements domain ports; the composition root wires everything.
-
-## 16 GB tuning
-
-| Setting | Default | Why |
-| --- | --- | --- |
-| `OLLAMA_MODEL` | `qwen3:8b` | Fits alongside the OS on 16 GB |
-| `OLLAMA_NUM_CTX` | `8192` | Bounded KV cache |
-| `OLLAMA_NUM_PREDICT` | `1024` | Caps generation length |
-| `OLLAMA_TEMPERATURE` | `0.2` | Less drift in the decision protocol |
-| `OLLAMA_KEEP_ALIVE` | `10m` | Avoids reloading between turns |
-| `MAX_AGENT_STEPS` | `12` | Stops runaway loops |
-| `MAX_CONTEXT_MESSAGES` | `16` | Sends only recent history |
-| `MAX_CONTEXT_CHARS` | `16000` | Hard character budget |
-| `MAX_MEMORY_CHARS` | `6000` | Caps memory in the prompt |
-| `KEEP_RECENT_MESSAGES` | `8` | Verbatim window after compaction |
-| `MAX_SUBAGENT_STEPS` | `8` | Child budget |
-| `MAX_SUBAGENTS_PER_TURN` | `2` | Delegation cap |
-| `MAX_SUBAGENT_RUN_MS` | `300000` | Child timeout |
-
-Qwen3 thinking mode is disabled (`think: false`). A `SerializedLlmAdapter` funnels every decision and compaction request through one promise chain, so parent and child never infer at the same time.
+A per-user logon task is preferred over running as `SYSTEM`: `SYSTEM` may not
+be able to read the user's Credential Manager entries. Sleep, reboot, or logoff
+will interrupt Telegram and email watchers; ARC is always-on only while the
+Windows session is available.
 
 ## Configuration
 
-All settings are optional environment variables; see `.env.example`.
+Copy `.env.example` to `.env`. Canonical variables include:
 
 | Variable | Default |
 | --- | --- |
-| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` |
-| `OLLAMA_MODEL` | `qwen3:8b` |
-| `OLLAMA_NUM_CTX` | `8192` |
-| `OLLAMA_NUM_PREDICT` | `1024` |
-| `OLLAMA_TEMPERATURE` | `0.2` |
-| `OLLAMA_TOP_P` | `0.9` |
-| `OLLAMA_KEEP_ALIVE` | `10m` |
-| `OLLAMA_TIMEOUT_MS` | `180000` |
-| `MAX_AGENT_STEPS` | `12` |
-| `MAX_CONTEXT_MESSAGES` | `16` |
-| `MAX_CONTEXT_CHARS` | `16000` |
-| `MAX_OBSERVATION_CHARS` | `4000` |
-| `MAX_MEMORY_CHARS` | `6000` |
-| `MAX_SKILL_INDEX_CHARS` | `2500` |
-| `KEEP_RECENT_MESSAGES` | `8` |
-| `MEMORY_AUTO_CAPTURE` | `true` |
-| `AGENT_HOME` | `./.agent-home` |
-| `AGENT_PROFILE` | `assistant` |
-| `WORKSPACE_DIR` | `./sandbox` |
-| `SANDBOX_DIR` | legacy alias for `WORKSPACE_DIR` |
-| `MAX_SUBAGENT_STEPS` | `8` |
-| `MAX_SUBAGENT_DEPTH` | `1` |
-| `MAX_SUBAGENTS_PER_TURN` | `2` |
-| `MAX_SUBAGENT_RUN_MS` | `300000` |
+| `ARC_HOME` | `./.arc` (macOS) / `%LOCALAPPDATA%\ARC\agent-home` (Windows) |
+| `ARC_WORKSPACE` | `./sandbox` |
+| `ARC_PROFILE` | `arc` |
+| `ARC_MODEL` | `qwen3:8b` |
+| `ARC_CODING_MODEL` | `qwen2.5-coder:7b` |
+| `ARC_RESEARCH_MODEL` | `qwen3:8b` |
+| `ARC_DECISION_MODEL` | `tev1:0.8b` |
+| `ARC_NUM_CTX` | `8192` |
+| `ARC_KEEP_ALIVE` | `10m` |
+| `ARC_MAX_AGENT_STEPS` | `12` |
+| `ARC_MAX_SUBAGENTS_PER_TURN` | `2` |
 
-## Scripts
+## Skills and profiles
+
+Built-in profiles: `arc` (default, all tools), `researcher` (read-only),
+`reviewer` (read-only), and `writer` (workspace writes only). Add or override
+profiles with Markdown frontmatter in `ARC_HOME/agents/<id>.md`.
+
+Skills are loaded from, in order:
+
+1. `<repo>/skills`
+2. `ARC_HOME/skills`
+3. `ARC_WORKSPACE/.skills`
+
+Later directories override earlier ones. `agents:` frontmatter limits a skill
+to named profiles; `tools:` limits the tools a skill may use.
+
+## Development
 
 ```bash
-npm start         # run the CLI
-npm run dev       # run with file watching
-npm run typecheck # TypeScript, no emit
-npm test          # 71 unit/integration tests via node:test + tsx
-npm run build     # compile to out/
-npm run start:prod
+npm run typecheck
+npm test
+npm run build
 ```
 
-The suite covers path policy, sandbox escapes, profile/skill parsing, Markdown memory and retrieval, context assembly, compaction, decision parsing, the agent loop, dispatcher permission checks, serialized inference, session v1→v2 compatibility, audit redaction, and sub-agent isolation/depth limits.
+The test suite covers the agent loop, context assembly, compaction, sub-agent
+isolation, profile policy, approval fail-closed behaviour, Tev1 response
+parsing, model routing, OS-keyring injection, Windows path hardening, sandbox
+containment, memory, sessions, skills, events/redaction, and `arc doctor`.
 
-## Deferred roadmap
+## Project layout
 
-Phases 3–5 build on these boundaries: approval-gated shell/network tools, web research, cron/heartbeat and standing-order automation, channels/nodes, optional sandboxed execution, embeddings, and a UI. The Gateway-style control plane and browser automation are intentionally out of scope for now.
+```text
+src/
+  domain/           entities, value objects, ports, path/security rules
+  application/      use cases, context assembly, routing, approvals
+  infrastructure/   Ollama, event bus, persistence, CLI, keyring, tools
+  shared/           small utilities
+skills/             built-in Markdown skills
+```
+
+## Roadmap
+
+- **Phase 4:** web search/fetch (Brave free tier), coding tools, approval-gated
+  PowerShell, interactive CLI approval prompt.
+- **Phase 5:** read-only Gmail IMAP ingestion, Tev1 notification triage,
+  Telegram remote chat and notifications.
+- **Phase 6:** read-only YouTube and Instagram performance analysis, content
+  suggestions.
+- **Phase 7:** always-on Windows hardening, installer or standalone build,
+  npm distribution.
+
+## Troubleshooting
+
+- **“Model … is not installed”** — run the `ollama pull` command shown by
+  `arc doctor`.
+- **Ollama is unreachable** — start `ollama serve` and confirm
+  `ARC_OLLAMA_BASE_URL`.
+- **ARC_HOME must be outside ARC_WORKSPACE** — move private state out of the
+  workspace; this is intentional.
+- **Keyring probe fails** — make sure ARC is running as the same logged-in
+  user that owns the Windows Credential Manager entries.
+- **Slow coding responses** — reduce `ARC_NUM_CTX` to 4096 and keep
+  `OLLAMA_MAX_LOADED_MODELS=1`.
+
+## License
+
+MIT

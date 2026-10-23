@@ -2,6 +2,7 @@ node_modules/
 out/
 .env
 sandbox/
+.arc/
 .agent-home/
 *.log
 .DS_Store

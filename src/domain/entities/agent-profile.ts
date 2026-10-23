@@ -17,7 +17,7 @@ export interface AgentProfileProps {
   memoryWrite: boolean;
   /** The tool policy also omits write tools; this is a defence in depth. */
   readOnly: boolean;
-  /** Built-in profiles can be overridden by AGENT_HOME/agents/<id>.md. */
+  /** Built-in profiles can be overridden by ARC_HOME/agents/<id>.md. */
   builtIn: boolean;
 }
 

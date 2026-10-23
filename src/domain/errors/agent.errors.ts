@@ -17,6 +17,10 @@ export class LlmError extends AgentError {}
 
 export class DecisionParseError extends LlmError {}
 
+export class DecisionModelError extends LlmError {}
+
+export class ApprovalError extends AgentError {}
+
 export class AgentTurnError extends AgentError {}
 
 export class SessionStoreError extends AgentError {}

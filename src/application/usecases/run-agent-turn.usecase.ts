@@ -9,6 +9,7 @@ import type { LLMPort } from "../../domain/ports/llm.port.js";
 import type { ToolCall } from "../../domain/value-objects/tool-call.js";
 import { truncateText } from "../../shared/text.js";
 import type { ContextAssembler } from "../services/context-assembler.js";
+import type { ModelRouter } from "../services/model-router.js";
 import type { ToolRegistry } from "../services/tool-registry.js";
 import type { CompactSessionUseCase } from "./compact-session.usecase.js";
 import type {
@@ -42,6 +43,7 @@ export interface RunAgentTurnOptions {
   assembler: ContextAssembler;
   compacter?: CompactSessionUseCase;
   events?: EventBusPort;
+  modelRouter?: ModelRouter;
 }
 
 /**
@@ -92,6 +94,9 @@ export class RunAgentTurnUseCase {
             systemPrompt: context.systemPrompt,
             messages: context.messages,
             tools: context.tools,
+            ...(this.options.modelRouter
+              ? { model: this.options.modelRouter.resolveForProfile(profile.id) }
+              : {}),
             ...(input.signal ? { signal: input.signal } : {}),
           });
           decision = result.decision;

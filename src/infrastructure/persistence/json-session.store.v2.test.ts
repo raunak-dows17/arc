@@ -21,7 +21,7 @@ describe("JsonSessionStore v2", () => {
 
   it("round-trips profile, parent, summary, and usage", async () => {
     const session = AgentSession.create("root-session", {
-      agentId: "assistant",
+      agentId: "arc",
     });
     session.addUserMessage("task");
     session.addAssistantMessage("done");
@@ -37,14 +37,14 @@ describe("JsonSessionStore v2", () => {
     const loaded = await store.load(session.id);
     assert.ok(loaded);
     assert.deepEqual(loaded.toProps(), session.toProps());
-    assert.equal(loaded.agentId, "assistant");
+    assert.equal(loaded.agentId, "arc");
     assert.equal(loaded.summary?.throughMessageCount, 1);
     assert.equal(loaded.usage.modelCalls, 1);
   });
 
   it("keeps child sessions out of latest() but includes them in list()", async () => {
     const parent = AgentSession.create("parent-session", {
-      agentId: "assistant",
+      agentId: "arc",
     });
     parent.addAssistantMessage("parent");
     await store.save(parent);
@@ -88,7 +88,7 @@ describe("JsonSessionStore v2", () => {
 
     const loaded = await store.load("legacy");
     assert.ok(loaded);
-    assert.equal(loaded.agentId, "assistant");
+    assert.equal(loaded.agentId, "arc");
     assert.equal(loaded.parentId, null);
     assert.equal(loaded.depth, 0);
     assert.equal(loaded.summary, null);

@@ -1,6 +1,8 @@
 import { realpath } from "node:fs/promises";
 import path from "node:path";
+import { ApprovalService, DenyAllApprovalPrompt } from "./application/services/approval.service.js";
 import { ContextAssembler } from "./application/services/context-assembler.js";
+import { ModelRouter } from "./application/services/model-router.js";
 import { PolicyEnforcingSandbox } from "./application/services/policy-enforcing-sandbox.js";
 import { ToolRegistry } from "./application/services/tool-registry.js";
 import { CompactSessionUseCase } from "./application/usecases/compact-session.usecase.js";
@@ -8,12 +10,14 @@ import { ExecuteToolUseCase } from "./application/usecases/execute-tool.usecase.
 import { RunAgentTurnUseCase } from "./application/usecases/run-agent-turn.usecase.js";
 import { SubAgentRunner } from "./application/usecases/sub-agent-runner.js";
 import { PathPolicy } from "./domain/services/path-policy.js";
-import { ensureAgentHome } from "./infrastructure/bootstrap/agent-home.js";
+import { ensureArcHome } from "./infrastructure/bootstrap/arc-home.js";
 import { ChatRepl } from "./infrastructure/cli/repl.js";
+import { printDoctorReport, runDoctor } from "./infrastructure/cli/doctor.js";
 import { TerminalRenderer } from "./infrastructure/cli/terminal.renderer.js";
 import { loadConfig } from "./infrastructure/config/env.js";
 import { InMemoryEventBus } from "./infrastructure/events/in-memory-event-bus.js";
 import { JsonlAuditLogger } from "./infrastructure/events/jsonl-audit.logger.js";
+import { OllamaDecisionAdapter } from "./infrastructure/llm/ollama-decision.adapter.js";
 import { OllamaLlmAdapter } from "./infrastructure/llm/ollama.adapter.js";
 import { SerializedLlmAdapter } from "./infrastructure/llm/serialized-llm.adapter.js";
 import { FileMemoryStore } from "./infrastructure/memory/file-memory.store.js";
@@ -35,7 +39,16 @@ import { errorMessage } from "./shared/text.js";
 async function main(): Promise<void> {
   const config = loadConfig();
   const renderer = new TerminalRenderer();
-  await ensureAgentHome(config);
+
+  if (process.argv[2] === "doctor") {
+    await ensureArcHome(config);
+    const report = await runDoctor(config);
+    printDoctorReport(report);
+    process.exitCode = report.ok ? 0 : 1;
+    return;
+  }
+
+  await ensureArcHome(config);
 
   const memory = new FileMemoryStore(config.memoryDir);
   await memory.initialize();
@@ -46,13 +59,13 @@ async function main(): Promise<void> {
     policy,
   );
   const sandbox = new PolicyEnforcingSandbox(innerSandbox, policy);
-  const realAgentHome = await realpath(config.agentHome);
+  const realArcHome = await realpath(config.arcHome);
   if (
-    realAgentHome === sandbox.root ||
-    realAgentHome.startsWith(`${sandbox.root}${path.sep}`)
+    realArcHome === sandbox.root ||
+    realArcHome.startsWith(`${sandbox.root}${path.sep}`)
   ) {
     renderer.error(
-      "AGENT_HOME resolves inside the workspace. Private state must stay outside the filesystem sandbox.",
+      "ARC_HOME resolves inside the workspace. Private state must stay outside the filesystem sandbox.",
     );
     process.exitCode = 1;
     return;
@@ -67,7 +80,7 @@ async function main(): Promise<void> {
   const defaultProfile = await profiles.get(config.agent.defaultProfileId);
   if (!defaultProfile) {
     renderer.error(
-      `Agent profile "${config.agent.defaultProfileId}" was not found. Check AGENT_PROFILE or AGENT_HOME/agents.`,
+      `ARC profile "${config.agent.defaultProfileId}" was not found. Check ARC_PROFILE or ARC_HOME/agents.`,
     );
     process.exitCode = 1;
     return;
@@ -92,19 +105,39 @@ async function main(): Promise<void> {
   registry.register(new LoadSkillTool(skills));
 
   const rawLlm = new OllamaLlmAdapter(config.ollama);
-  const health = await rawLlm.checkHealth();
+  const health = await rawLlm.checkHealth([
+    config.ollama.model,
+    config.ollama.codingModel,
+    config.ollama.researchModel,
+    config.ollama.decisionModel,
+  ]);
   for (const warning of health.warnings) {
     renderer.warn(warning);
   }
-  if (!health.modelAvailable) {
-    renderer.error(`Install "${config.ollama.model}" and start the CLI again.`);
+  if (health.missingModels.includes(config.ollama.model)) {
+    renderer.error(
+      `Install "${config.ollama.model}" and start ARC again.`,
+    );
     process.exitCode = 1;
     return;
   }
 
-  const llm = new SerializedLlmAdapter(rawLlm);
+  const decisionModel = new OllamaDecisionAdapter({
+    baseUrl: config.ollama.decisionBaseUrl,
+    model: config.ollama.decisionModel,
+    keepAlive: config.ollama.keepAlive,
+    timeoutMs: config.ollama.timeoutMs,
+  });
+  const llm = new SerializedLlmAdapter(rawLlm, decisionModel);
+  const modelRouter = new ModelRouter({
+    main: config.ollama.model,
+    research: config.ollama.researchModel,
+    coding: config.ollama.codingModel,
+    decision: config.ollama.decisionModel,
+  });
   const sessionStore = new JsonSessionStore(config.sessionDir);
   const subAgentRuns = new JsonSubAgentRepository(config.runDir);
+  const approvals = new ApprovalService(new DenyAllApprovalPrompt());
 
   const relativeWorkspace =
     path.relative(process.cwd(), sandbox.root) || path.basename(sandbox.root);
@@ -132,7 +165,7 @@ async function main(): Promise<void> {
     keepRecentMessages: config.agent.keepRecentMessages,
   });
 
-  const executeTool = new ExecuteToolUseCase(registry);
+  const executeTool = new ExecuteToolUseCase(registry, approvals);
   const subAgentRunner = new SubAgentRunner(
     {
       profiles,
@@ -144,6 +177,7 @@ async function main(): Promise<void> {
       assembler,
       compacter,
       events,
+      modelRouter,
     },
     {
       maxDepth: config.subAgents.maxDepth,
@@ -165,6 +199,7 @@ async function main(): Promise<void> {
       assembler,
       compacter,
       events,
+      modelRouter,
     },
   );
 
@@ -175,7 +210,7 @@ async function main(): Promise<void> {
     runAgentTurn,
     renderer,
     modelName: config.ollama.model,
-    agentHome: config.agentHome,
+    arcHome: config.arcHome,
     defaultProfileId: config.agent.defaultProfileId,
     profiles,
     skills,

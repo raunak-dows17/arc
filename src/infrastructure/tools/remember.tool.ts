@@ -54,7 +54,7 @@ export class RememberTool implements ToolPort {
     const result = await this.memory.remember(args.content, scope);
     this.events?.emit("memory.written", {
       sessionId: context?.sessionId ?? "unknown",
-      agentId: context?.agentId ?? "assistant",
+      agentId: context?.agentId ?? "arc",
       data: { path: result.path, scope, bytes: result.bytes },
     });
     return `Remembered in ${result.path}.`;

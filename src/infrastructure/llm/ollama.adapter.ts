@@ -36,6 +36,8 @@ const tagsResponseSchema = z.object({
 
 export interface OllamaHealth {
   modelAvailable: boolean;
+  checkedModels: string[];
+  missingModels: string[];
   warnings: string[];
 }
 
@@ -58,9 +60,13 @@ export class OllamaLlmAdapter implements LLMPort, TextGenerationPort {
   }
 
   /**
-   * Verifies that Ollama is reachable and the configured model is installed.
+   * Verifies that Ollama is reachable and the requested models are installed.
+   * The main model is checked by default; callers can check the full routing
+   * set with checkHealth([main, coding, research, decision]).
    */
-  async checkHealth(): Promise<OllamaHealth> {
+  async checkHealth(
+    models: readonly string[] = [this.config.model],
+  ): Promise<OllamaHealth> {
     let response: Response;
     try {
       response = await fetch(`${this.baseUrl}/api/tags`, {
@@ -85,28 +91,39 @@ export class OllamaLlmAdapter implements LLMPort, TextGenerationPort {
     }
 
     const warnings: string[] = [];
-    const wanted = normalizeModelName(this.config.model);
-    const model = parsed.data.models.find(
-      (candidate) =>
-        normalizeModelName(candidate.name) === wanted ||
-        candidate.name === this.config.model ||
-        candidate.name.split(":")[0] === this.config.model,
-    );
+    const checkedModels = [...new Set(models)];
+    const missingModels: string[] = [];
 
-    if (!model) {
-      warnings.push(
-        `Model "${this.config.model}" is not installed. Run: ollama pull ${this.config.model}`,
+    for (const wantedName of checkedModels) {
+      const wanted = normalizeModelName(wantedName);
+      const model = parsed.data.models.find(
+        (candidate) =>
+          normalizeModelName(candidate.name) === wanted ||
+          candidate.name === wantedName ||
+          candidate.name.split(":")[0] === wantedName,
       );
-      return { modelAvailable: false, warnings };
+
+      if (!model) {
+        missingModels.push(wantedName);
+        warnings.push(
+          `Model "${wantedName}" is not installed. Run: ollama pull ${wantedName}`,
+        );
+        continue;
+      }
+
+      if (model.size !== undefined && model.size > LARGE_MODEL_BYTES) {
+        warnings.push(
+          `Model "${model.name}" is larger than 9 GB. With 16 GB RAM, qwen3:8b is the recommended maximum.`,
+        );
+      }
     }
 
-    if (model.size !== undefined && model.size > LARGE_MODEL_BYTES) {
-      warnings.push(
-        `Model "${model.name}" is larger than 9 GB. With 16 GB RAM, qwen3:8b is the recommended maximum.`,
-      );
-    }
-
-    return { modelAvailable: true, warnings };
+    return {
+      modelAvailable: missingModels.length === 0,
+      checkedModels,
+      missingModels,
+      warnings,
+    };
   }
 
   async generateDecision(request: LlmRequest): Promise<LlmDecisionResult> {
@@ -137,7 +154,11 @@ export class OllamaLlmAdapter implements LLMPort, TextGenerationPort {
             ];
 
       const data = await this.postChat(
-        this.decisionPayload(messages, format),
+        this.decisionPayload(
+          messages,
+          format,
+          request.model ?? this.config.model,
+        ),
         request.signal,
       );
 
@@ -162,7 +183,11 @@ export class OllamaLlmAdapter implements LLMPort, TextGenerationPort {
 
   async generateText(
     prompt: string,
-    options: { systemPrompt?: string; signal?: AbortSignal } = {},
+    options: {
+      systemPrompt?: string;
+      model?: string;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<TextGenerationResult> {
     const messages = [
       ...(options.systemPrompt
@@ -173,7 +198,7 @@ export class OllamaLlmAdapter implements LLMPort, TextGenerationPort {
 
     const data = await this.postChat(
       {
-        model: this.config.model,
+        model: options.model ?? this.config.model,
         messages,
         stream: false,
         think: false,
@@ -198,9 +223,10 @@ export class OllamaLlmAdapter implements LLMPort, TextGenerationPort {
   private decisionPayload(
     messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
     format: Record<string, unknown>,
+    model: string,
   ): Record<string, unknown> {
     return {
-      model: this.config.model,
+      model,
       messages,
       stream: false,
       format,
@@ -261,9 +287,10 @@ export class OllamaLlmAdapter implements LLMPort, TextGenerationPort {
 
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
+      const requestedModel = String(payload.model ?? this.config.model);
       if (response.status === 404) {
         throw new LlmError(
-          `Ollama model "${this.config.model}" was not found. Run: ollama pull ${this.config.model}`,
+          `Ollama model "${requestedModel}" was not found. Run: ollama pull ${requestedModel}`,
         );
       }
       throw new LlmError(
