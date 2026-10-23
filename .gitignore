@@ -1,7 +1,7 @@
 node_modules/
 out/
 .env
-sandbox/
+/sandbox/
 .arc/
 .agent-home/
 *.log
