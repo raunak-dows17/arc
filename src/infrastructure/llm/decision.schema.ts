@@ -23,6 +23,19 @@ const decisionSchema = z
 export function buildDecisionFormat(
   toolNames: readonly string[],
 ): Record<string, unknown> {
+  if (toolNames.length === 0) {
+    return {
+      type: "object",
+      properties: {
+        thought: { type: "string" },
+        tool: { type: "null" },
+        final: { type: "string" },
+      },
+      required: ["thought", "tool", "final"],
+      additionalProperties: false,
+    };
+  }
+
   const toolCall = {
     type: "object",
     properties: {

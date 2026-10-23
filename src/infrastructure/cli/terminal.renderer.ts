@@ -1,5 +1,11 @@
 import pc from "picocolors";
-import type { SessionMessage } from "../../domain/entities/agent-session.js";
+import type { AgentProfile } from "../../domain/entities/agent-profile.js";
+import type {
+  SessionMessage,
+  SessionUsage,
+} from "../../domain/entities/agent-session.js";
+import type { Skill } from "../../domain/entities/skill.js";
+import type { SubAgentRun } from "../../domain/entities/sub-agent-run.js";
 import type { SandboxEntry } from "../../domain/ports/sandbox.port.js";
 import type { SessionSummary } from "../../domain/ports/session-store.port.js";
 import type { ToolDefinition } from "../../domain/ports/tool.port.js";
@@ -16,6 +22,21 @@ export interface BannerInput {
   sandbox: string;
   sessionId: string;
   resumed: boolean;
+  agentHome: string;
+  profile: string;
+}
+
+export interface StatusInput {
+  profile: AgentProfile;
+  model: string;
+  workspace: string;
+  agentHome: string;
+  sessionId: string;
+  depth: number;
+  messageCount: number;
+  usage: SessionUsage;
+  context: { systemChars: number; historyChars: number; messages: number };
+  autoCapture: boolean;
 }
 
 class Spinner {
@@ -63,8 +84,10 @@ export class TerminalRenderer {
   banner(input: BannerInput): void {
     console.log();
     console.log(`  ${bold(cyan("Local Autonomous Agent"))}`);
+    console.log(dim(`  profile  ${input.profile}`));
     console.log(dim(`  model    ${input.model}`));
-    console.log(dim(`  sandbox  ${input.sandbox}`));
+    console.log(dim(`  workspace ${input.sandbox}`));
+    console.log(dim(`  home     ${input.agentHome}`));
     console.log(
       dim(
         `  session  ${input.sessionId}${input.resumed ? " (resumed)" : ""}`,
@@ -105,9 +128,39 @@ export class TerminalRenderer {
       .slice(0, 2)
       .map((line) => singleLine(line, 110))
       .join(" / ");
-    const suffix = outcome.observation.split(/\r?\n/).filter(Boolean).length > 2 ? " …" : "";
+    const suffix =
+      outcome.observation.split(/\r?\n/).filter(Boolean).length > 2 ? " …" : "";
     const marker = outcome.ok ? green("✓") : red("✗");
     console.log(`  ${marker} ${dim(preview)}${dim(suffix)}`);
+  }
+
+  subAgentStarted(input: {
+    agentId: string;
+    task: string;
+    runId: string;
+  }): void {
+    this.spinner.stop();
+    console.log(
+      `  ${yellow("↳")} ${yellow(input.agentId)} ${dim(`started · ${singleLine(input.task, 100)}`)}`,
+    );
+    console.log(dim(`    ${input.runId}`));
+  }
+
+  subAgentFinished(input: {
+    agentId: string;
+    status: string;
+    steps: number;
+    summary: string;
+  }): void {
+    this.spinner.stop();
+    const ok = input.status === "completed";
+    const marker = ok ? green("✓") : red("✗");
+    console.log(
+      `  ${marker} ${yellow(input.agentId)} ${dim(`${input.status} · ${input.steps} tool call(s)`)}`,
+    );
+    if (input.summary) {
+      console.log(dim(`    ${singleLine(input.summary, 140)}`));
+    }
   }
 
   finalAnswer(answer: string): void {
@@ -131,9 +184,10 @@ export class TerminalRenderer {
     console.log();
     for (const [index, message] of recent.entries()) {
       const number = messages.length - recent.length + index + 1;
-      const label = message.role === "tool"
-        ? `tool:${message.toolName ?? "?"}`
-        : message.role;
+      const label =
+        message.role === "tool"
+          ? `tool:${message.toolName ?? "?"}`
+          : message.role;
       console.log(
         `  ${dim(`#${number}`)} ${bold(label.padEnd(14))} ${singleLine(message.content, 140)}`,
       );
@@ -151,8 +205,9 @@ export class TerminalRenderer {
     console.log();
     for (const session of sessions) {
       const current = session.id === currentId ? cyan(" ← current") : "";
+      const child = session.parentId ? dim(" ↳ child") : "";
       console.log(
-        `  ${bold(session.id)} ${dim(`· ${session.status} · ${session.messageCount} messages · ${session.updatedAt}`)}${current}`,
+        `  ${bold(session.id)} ${dim(`· ${session.agentId} · ${session.status} · ${session.messageCount} messages · ${session.updatedAt}`)}${child}${current}`,
       );
     }
     console.log();
@@ -170,15 +225,165 @@ export class TerminalRenderer {
   sandboxInfo(root: string, entries: readonly SandboxEntry[]): void {
     this.spinner.stop();
     console.log();
-    console.log(`  ${dim("sandbox")} ${root}`);
+    console.log(`  ${dim("workspace")} ${root}`);
     if (entries.length === 0) {
       console.log(dim("  (empty)"));
     } else {
       for (const entry of entries) {
-        const suffix = entry.type === "directory" ? "/" : ` (${entry.sizeBytes ?? 0} bytes)`;
+        const suffix =
+          entry.type === "directory" ? "/" : ` (${entry.sizeBytes ?? 0} bytes)`;
         console.log(`  ${entry.name}${suffix}`);
       }
     }
+    console.log();
+  }
+
+  status(input: StatusInput): void {
+    this.spinner.stop();
+    const estimatedTokens = Math.ceil(
+      (input.context.systemChars + input.context.historyChars) / 4,
+    );
+    console.log();
+    console.log(`  ${bold("status")}`);
+    this.field("profile", `${input.profile.id} · ${input.profile.description}`);
+    this.field("model", input.model);
+    this.field("workspace", input.workspace);
+    this.field("agent home", input.agentHome);
+    this.field(
+      "session",
+      `${input.sessionId}${input.depth > 0 ? ` · depth ${input.depth}` : ""} · ${input.messageCount} messages`,
+    );
+    this.field(
+      "usage",
+      `${input.usage.modelCalls} model call(s) · ${input.usage.promptTokens} prompt tok · ${input.usage.completionTokens} completion tok`,
+    );
+    this.field(
+      "context",
+      `~${estimatedTokens} tokens estimated · ${input.context.messages} messages · ${input.context.systemChars} system chars`,
+    );
+    this.field("memory", input.autoCapture ? "auto-capture on" : "auto-capture off");
+    this.field(
+      "tools",
+      input.profile.tools === "*" ? "all" : input.profile.tools.join(", "),
+    );
+    console.log();
+  }
+
+  memory(input: { user: string; longTerm: string; recentDaily: string }): void {
+    this.spinner.stop();
+    console.log();
+    this.block("USER.md", input.user);
+    this.block("MEMORY.md", input.longTerm);
+    this.block("recent daily notes", input.recentDaily);
+    console.log();
+  }
+
+  memoryResults(results: readonly { path: string; title: string; snippet: string; score: number }[]): void {
+    this.spinner.stop();
+    if (results.length === 0) {
+      this.info("No memory matches.");
+      return;
+    }
+    console.log();
+    for (const result of results) {
+      console.log(
+        `  ${bold(cyan(result.path))} ${dim(`· ${result.title} · score ${result.score}`)}`,
+      );
+      console.log(dim(`    ${singleLine(result.snippet, 150)}`));
+    }
+    console.log();
+  }
+
+  skills(skills: readonly Skill[]): void {
+    this.spinner.stop();
+    if (skills.length === 0) {
+      this.info("No skills installed.");
+      return;
+    }
+    console.log();
+    for (const skill of skills) {
+      console.log(
+        `  ${bold(cyan(skill.name))} ${dim(skill.description)}`,
+      );
+      if (skill.whenToUse) {
+        console.log(dim(`    when: ${skill.whenToUse}`));
+      }
+    }
+    console.log();
+  }
+
+  skill(skill: Skill): void {
+    this.spinner.stop();
+    console.log();
+    console.log(`  ${bold(cyan(skill.name))} ${dim(skill.description)}`);
+    if (skill.whenToUse) {
+      console.log(dim(`  when: ${skill.whenToUse}`));
+    }
+    console.log(dim(`  source: ${skill.sourcePath}`));
+    console.log();
+    for (const line of skill.body.split(/\r?\n/)) {
+      console.log(line.length > 0 ? `  ${line}` : "");
+    }
+    console.log();
+  }
+
+  profiles(profiles: readonly AgentProfile[], current: string): void {
+    this.spinner.stop();
+    console.log();
+    for (const profile of profiles) {
+      const marker = profile.id === current ? cyan(" ← current") : "";
+      const source = profile.builtIn ? "" : dim(" · user");
+      console.log(
+        `  ${bold(cyan(profile.id))} ${dim(profile.description)}${source}${marker}`,
+      );
+      console.log(
+        dim(
+          `    tools: ${profile.tools === "*" ? "all" : profile.tools.join(", ")} · steps: ${profile.maxSteps} · spawn: ${profile.canSpawn ? "yes" : "no"}`,
+        ),
+      );
+    }
+    console.log();
+  }
+
+  tasks(runs: readonly SubAgentRun[]): void {
+    this.spinner.stop();
+    if (runs.length === 0) {
+      this.info("No sub-agent runs for this session.");
+      return;
+    }
+    console.log();
+    for (const run of runs) {
+      const marker =
+        run.status === "completed"
+          ? green("✓")
+          : run.status === "running"
+            ? yellow("…")
+            : red("✗");
+      console.log(
+        `  ${marker} ${bold(run.id)} ${dim(`· ${run.agentId} · ${run.status} · ${run.steps} steps · ${run.createdAt}`)}`,
+      );
+      console.log(dim(`    ${singleLine(run.task, 140)}`));
+    }
+    console.log();
+  }
+
+  task(run: SubAgentRun): void {
+    this.spinner.stop();
+    console.log();
+    console.log(`  ${bold("task")} ${run.id}`);
+    this.field("agent", `${run.agentId} · depth ${run.depth}`);
+    this.field("status", run.status);
+    this.field("child session", run.childSessionId);
+    this.field("created", run.createdAt);
+    if (run.finishedAt) {
+      this.field("finished", run.finishedAt);
+    }
+    this.field("usage", `${run.usage.modelCalls} model call(s)`);
+    console.log(`\n  ${dim("task")}\n  ${run.task}`);
+    if (run.error) {
+      console.log(`\n  ${red("error")}\n  ${run.error}`);
+    }
+    this.block("summary", run.summary);
     console.log();
   }
 
@@ -187,16 +392,29 @@ export class TerminalRenderer {
     console.log();
     const commands: Array<[string, string]> = [
       ["/help", "Show this help"],
-      ["/new", "Start a new, empty session"],
+      ["/new [profile]", "Start a new session, optionally with an agent profile"],
       ["/sessions", "List saved sessions"],
-      ["/history", "Show the last 20 messages of this session"],
-      ["/tools", "List available tools"],
-      ["/sandbox", "Show the sandbox root and its contents"],
+      ["/history [id]", "Show recent messages (current session or a child id)"],
+      ["/status", "Profile, paths, usage, and context estimate"],
+      ["/tools", "List tools available to the current profile"],
+      ["/memory", "Show USER.md, MEMORY.md, and recent daily notes"],
+      ["/search <query>", "Search Markdown memory"],
+      ["/remember [daily] <text>", "Save a durable memory note"],
+      ["/skills", "List installed skills"],
+      ["/skill <name>", "Show a skill body"],
+      ["/skill reload", "Re-scan skill directories"],
+      ["/agents", "List agent profiles"],
+      ["/agent <name> <task>", "Run a sub-agent directly"],
+      ["/tasks", "List sub-agent runs for this session"],
+      ["/task <id>", "Show one sub-agent run"],
+      ["/compact", "Summarize older history now"],
+      ["/cancel", "Cancel the running turn (Ctrl+C also works)"],
+      ["/sandbox [path]", "Show the workspace and a directory listing"],
       ["/model", "Show the configured Ollama model"],
       ["/exit", "Quit the CLI (Ctrl+D also works)"],
     ];
     for (const [command, description] of commands) {
-      console.log(`  ${bold(command.padEnd(12))} ${dim(description)}`);
+      console.log(`  ${bold(command.padEnd(24))} ${dim(description)}`);
     }
     console.log(
       dim(
@@ -219,5 +437,26 @@ export class TerminalRenderer {
   error(message: string): void {
     this.spinner.stop();
     console.log(`  ${red("✗")} ${message}`);
+  }
+
+  private field(label: string, value: string): void {
+    console.log(`  ${dim(label.padEnd(12))} ${value}`);
+  }
+
+  private block(title: string, text: string): void {
+    console.log(`  ${bold(title)}`);
+    const trimmed = text.trim();
+    if (!trimmed) {
+      console.log(dim("  (empty)"));
+      return;
+    }
+    const lines = trimmed.split(/\r?\n/);
+    for (const line of lines.slice(0, 40)) {
+      console.log(`  ${line}`);
+    }
+    if (lines.length > 40) {
+      console.log(dim(`  … ${lines.length - 40} more line(s)`));
+    }
+    console.log();
   }
 }

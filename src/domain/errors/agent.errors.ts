@@ -20,3 +20,11 @@ export class DecisionParseError extends LlmError {}
 export class AgentTurnError extends AgentError {}
 
 export class SessionStoreError extends AgentError {}
+
+export class ProfileError extends AgentError {}
+
+export class SkillError extends AgentError {}
+
+export class MemoryStoreError extends AgentError {}
+
+export class SubAgentError extends AgentError {}

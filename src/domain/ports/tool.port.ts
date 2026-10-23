@@ -5,7 +5,16 @@ export interface ToolDefinition {
   parameters: Record<string, unknown>;
 }
 
+export interface ToolExecutionContext {
+  sessionId: string;
+  agentId: string;
+  depth: number;
+  /** Skills allowed for the active profile; "*" means all. */
+  allowedSkills?: "*" | readonly string[];
+  signal?: AbortSignal;
+}
+
 export interface ToolPort {
   getDefinition(): ToolDefinition;
-  execute(args: unknown): Promise<string>;
+  execute(args: unknown, context?: ToolExecutionContext): Promise<string>;
 }

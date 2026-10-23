@@ -1,13 +1,16 @@
-import type { AgentSession } from "../../domain/entities/agent-session.js";
+import type { AgentProfile } from "../../domain/entities/agent-profile.js";
+import type {
+  AgentSession,
+  SessionUsage,
+} from "../../domain/entities/agent-session.js";
 import { AgentTurnError } from "../../domain/errors/agent.errors.js";
+import type { EventBusPort } from "../../domain/events/agent-event.js";
 import type { LLMPort } from "../../domain/ports/llm.port.js";
 import type { ToolCall } from "../../domain/value-objects/tool-call.js";
 import { truncateText } from "../../shared/text.js";
-import {
-  buildContextMessages,
-  type ContextLimits,
-} from "../services/context-builder.js";
+import type { ContextAssembler } from "../services/context-assembler.js";
 import type { ToolRegistry } from "../services/tool-registry.js";
+import type { CompactSessionUseCase } from "./compact-session.usecase.js";
 import type {
   ExecuteToolUseCase,
   ToolOutcome,
@@ -20,20 +23,25 @@ export interface AgentTurnCallbacks {
   onToolCall?: (call: ToolCall) => void;
   onToolResult?: (call: ToolCall, outcome: ToolOutcome) => void;
   onFinal?: (answer: string) => void;
+  onUsage?: (usage: SessionUsage) => void;
 }
 
 export interface RunAgentTurnInput {
   session: AgentSession;
+  profile: AgentProfile;
   prompt: string;
   signal?: AbortSignal;
   callbacks?: AgentTurnCallbacks;
 }
 
 export interface RunAgentTurnOptions {
+  /** Global cap; the profile's own maxSteps is applied as a second cap. */
   maxSteps: number;
-  systemPrompt: string;
-  contextLimits: ContextLimits;
   maxObservationChars: number;
+  maxSubAgentsPerTurn: number;
+  assembler: ContextAssembler;
+  compacter?: CompactSessionUseCase;
+  events?: EventBusPort;
 }
 
 /**
@@ -50,33 +58,50 @@ export class RunAgentTurnUseCase {
   ) {}
 
   async execute(input: RunAgentTurnInput): Promise<string> {
-    const { session } = input;
+    const { session, profile } = input;
     const callbacks = input.callbacks ?? {};
-    const tools = this.registry.getDefinitions();
+    const maxSteps = Math.max(1, Math.min(this.options.maxSteps, profile.maxSteps));
+    let subAgentCalls = 0;
     session.addUserMessage(input.prompt);
-
-    let lastCall: ToolCall | null = null;
+    this.emit("turn.started", session, {
+      profile: profile.id,
+      prompt: truncateText(input.prompt, 1_000),
+    });
 
     try {
-      for (let step = 0; step < this.options.maxSteps; step += 1) {
+      try {
+        await this.options.compacter?.maybeCompact(session, input.signal);
+      } catch (error) {
+        if (input.signal?.aborted) {
+          throw error;
+        }
+        // Compaction is best-effort; the normal history trim still applies.
+      }
+
+      let lastCall: ToolCall | null = null;
+
+      for (let step = 0; step < maxSteps; step += 1) {
         input.signal?.throwIfAborted();
 
         callbacks.onThinkingStart?.();
         let decision;
+        let usage;
         try {
-          decision = await this.llm.generateDecision({
-            systemPrompt: this.options.systemPrompt,
-            messages: buildContextMessages(
-              session.messages,
-              this.options.contextLimits,
-            ),
-            tools,
+          const context = await this.options.assembler.assemble(session, profile);
+          const result = await this.llm.generateDecision({
+            systemPrompt: context.systemPrompt,
+            messages: context.messages,
+            tools: context.tools,
             ...(input.signal ? { signal: input.signal } : {}),
           });
+          decision = result.decision;
+          usage = result.usage;
         } finally {
           callbacks.onThinkingEnd?.();
         }
 
+        session.recordUsage(usage);
+        callbacks.onUsage?.(session.usage);
         input.signal?.throwIfAborted();
 
         if (decision.thought.trim()) {
@@ -87,6 +112,11 @@ export class RunAgentTurnUseCase {
           session.addAssistantMessage(decision.finalAnswer);
           session.markCompleted();
           callbacks.onFinal?.(decision.finalAnswer);
+          this.emit("turn.finished", session, {
+            profile: profile.id,
+            status: "completed",
+            answer: truncateText(decision.finalAnswer, 2_000),
+          });
           return decision.finalAnswer;
         }
 
@@ -98,6 +128,10 @@ export class RunAgentTurnUseCase {
         }
 
         callbacks.onToolCall?.(call);
+        this.emit("tool.started", session, {
+          tool: call.name,
+          args: call.args,
+        });
 
         let outcome: ToolOutcome;
         if (lastCall?.equals(call)) {
@@ -105,8 +139,29 @@ export class RunAgentTurnUseCase {
             ok: false,
             observation: `Duplicate call blocked. You already called "${call.name}" with identical arguments. Use the previous result or choose a different action.`,
           };
+        } else if (
+          call.name === "run_agent" &&
+          subAgentCalls >= this.options.maxSubAgentsPerTurn
+        ) {
+          outcome = {
+            ok: false,
+            observation: `Sub-agent budget reached (${this.options.maxSubAgentsPerTurn} per turn). Finish the current work yourself or answer with what you have.`,
+          };
         } else {
-          outcome = await this.executeTool.execute(call);
+          if (call.name === "run_agent") {
+            subAgentCalls += 1;
+          }
+          outcome = await this.executeTool.execute(
+            call,
+            {
+              sessionId: session.id,
+              agentId: profile.id,
+              depth: session.depth,
+              allowedSkills: profile.skills,
+              ...(input.signal ? { signal: input.signal } : {}),
+            },
+            profile,
+          );
           lastCall = call;
         }
 
@@ -116,14 +171,36 @@ export class RunAgentTurnUseCase {
         );
         session.addToolResult(call.name, observation);
         callbacks.onToolResult?.(call, { ...outcome, observation });
+        this.emit("tool.finished", session, {
+          tool: call.name,
+          ok: outcome.ok,
+          observation: truncateText(outcome.observation, 1_000),
+        });
       }
 
       throw new AgentTurnError(
-        `Agent reached the ${this.options.maxSteps}-step limit without a final answer.`,
+        `Agent reached the ${maxSteps}-step limit without a final answer.`,
       );
     } catch (error) {
       session.markFailed();
+      this.emit("turn.finished", session, {
+        profile: profile.id,
+        status: input.signal?.aborted ? "aborted" : "failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
       throw error;
     }
+  }
+
+  private emit(
+    type: "turn.started" | "turn.finished" | "tool.started" | "tool.finished",
+    session: AgentSession,
+    data: Record<string, unknown>,
+  ): void {
+    this.options.events?.emit(type, {
+      sessionId: session.id,
+      agentId: session.agentId,
+      data,
+    });
   }
 }

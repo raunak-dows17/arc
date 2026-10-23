@@ -2,7 +2,7 @@ node_modules/
 out/
 .env
 sandbox/
+.agent-home/
 *.log
 .DS_Store
 coverage/
-sandbox/

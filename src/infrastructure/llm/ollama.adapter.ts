@@ -1,10 +1,16 @@
 import { z } from "zod";
+import type { LlmUsage } from "../../domain/entities/agent-session.js";
 import {
   DecisionParseError,
   LlmError,
 } from "../../domain/errors/agent.errors.js";
-import type { LLMPort, LlmRequest } from "../../domain/ports/llm.port.js";
-import type { AgentDecision } from "../../domain/value-objects/agent-decision.js";
+import type {
+  LLMPort,
+  LlmDecisionResult,
+  LlmRequest,
+  TextGenerationPort,
+  TextGenerationResult,
+} from "../../domain/ports/llm.port.js";
 import type { OllamaConfig } from "../config/env.js";
 import { buildDecisionFormat, parseDecision } from "./decision.schema.js";
 
@@ -14,6 +20,9 @@ const chatResponseSchema = z.object({
     content: z.string(),
   }),
   done: z.boolean().optional(),
+  prompt_eval_count: z.number().int().nonnegative().optional(),
+  eval_count: z.number().int().nonnegative().optional(),
+  total_duration: z.number().nonnegative().optional(),
 });
 
 const tagsResponseSchema = z.object({
@@ -33,9 +42,8 @@ export interface OllamaHealth {
 const MAX_ATTEMPTS = 2;
 const LARGE_MODEL_BYTES = 9 * 1024 ** 3;
 
-export class OllamaLlmAdapter implements LLMPort {
+export class OllamaLlmAdapter implements LLMPort, TextGenerationPort {
   private readonly baseUrl: string;
-  private thinkEnabled = true;
 
   constructor(private readonly config: OllamaConfig) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
@@ -101,7 +109,7 @@ export class OllamaLlmAdapter implements LLMPort {
     return { modelAvailable: true, warnings };
   }
 
-  async generateDecision(request: LlmRequest): Promise<AgentDecision> {
+  async generateDecision(request: LlmRequest): Promise<LlmDecisionResult> {
     const format = buildDecisionFormat(request.tools.map((tool) => tool.name));
     const baseMessages = [
       { role: "system" as const, content: request.systemPrompt },
@@ -128,25 +136,16 @@ export class OllamaLlmAdapter implements LLMPort {
               },
             ];
 
-      const payload = {
-        model: this.config.model,
-        messages,
-        stream: false,
-        format,
-        ...(this.thinkEnabled ? { think: false } : {}),
-        keep_alive: this.config.keepAlive,
-        options: {
-          temperature: this.config.temperature,
-          top_p: this.config.topP,
-          num_ctx: this.config.numCtx,
-          repeat_penalty: 1.05,
-        },
-      };
-
-      const data = await this.postChat(payload, request.signal);
+      const data = await this.postChat(
+        this.decisionPayload(messages, format),
+        request.signal,
+      );
 
       try {
-        return parseDecision(data.message.content);
+        return {
+          decision: parseDecision(data.message.content),
+          usage: this.usageFrom(data),
+        };
       } catch (error) {
         if (error instanceof DecisionParseError) {
           lastParseError = error;
@@ -159,6 +158,70 @@ export class OllamaLlmAdapter implements LLMPort {
     throw new LlmError(
       `The model did not return a valid decision after ${MAX_ATTEMPTS} attempts. Last error: ${lastParseError?.message ?? "unknown"}`,
     );
+  }
+
+  async generateText(
+    prompt: string,
+    options: { systemPrompt?: string; signal?: AbortSignal } = {},
+  ): Promise<TextGenerationResult> {
+    const messages = [
+      ...(options.systemPrompt
+        ? [{ role: "system" as const, content: options.systemPrompt }]
+        : []),
+      { role: "user" as const, content: prompt },
+    ];
+
+    const data = await this.postChat(
+      {
+        model: this.config.model,
+        messages,
+        stream: false,
+        think: false,
+        keep_alive: this.config.keepAlive,
+        options: {
+          temperature: 0.2,
+          top_p: this.config.topP,
+          num_ctx: this.config.numCtx,
+          num_predict: Math.min(512, this.config.numPredict),
+          repeat_penalty: 1.05,
+        },
+      },
+      options.signal,
+    );
+
+    return {
+      text: data.message.content.trim(),
+      usage: this.usageFrom(data),
+    };
+  }
+
+  private decisionPayload(
+    messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+    format: Record<string, unknown>,
+  ): Record<string, unknown> {
+    return {
+      model: this.config.model,
+      messages,
+      stream: false,
+      format,
+      think: false,
+      keep_alive: this.config.keepAlive,
+      options: {
+        temperature: this.config.temperature,
+        top_p: this.config.topP,
+        num_ctx: this.config.numCtx,
+        num_predict: this.config.numPredict,
+        repeat_penalty: 1.05,
+      },
+    };
+  }
+
+  private usageFrom(data: z.infer<typeof chatResponseSchema>): LlmUsage {
+    return {
+      promptTokens: data.prompt_eval_count ?? 0,
+      completionTokens: data.eval_count ?? 0,
+      totalDurationMs: Math.round((data.total_duration ?? 0) / 1_000_000),
+    };
   }
 
   private async postChat(

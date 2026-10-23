@@ -95,4 +95,13 @@ describe("buildDecisionFormat", () => {
     assert.match(serialized, /"write_file"/);
     assert.match(serialized, /"additionalProperties":false/);
   });
+
+  it("returns a final-only grammar when no tools are available", () => {
+    const format = buildDecisionFormat([]);
+    const serialized = JSON.stringify(format);
+
+    assert.match(serialized, /"tool":\{"type":"null"\}/);
+    assert.match(serialized, /"required":\["thought","tool","final"\]/);
+    assert.doesNotMatch(serialized, /"enum":\[\]/);
+  });
 });

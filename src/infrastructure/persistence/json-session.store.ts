@@ -3,6 +3,7 @@ import path from "node:path";
 import { z } from "zod";
 import {
   AgentSession,
+  emptySessionUsage,
   type AgentSessionProps,
 } from "../../domain/entities/agent-session.js";
 import { SessionStoreError } from "../../domain/errors/agent.errors.js";
@@ -13,6 +14,23 @@ import type {
 
 const SAFE_SESSION_ID = /^[A-Za-z0-9._-]+$/;
 
+const usageSchema = z.object({
+  modelCalls: z.number().int().nonnegative().default(0),
+  promptTokens: z.number().int().nonnegative().default(0),
+  completionTokens: z.number().int().nonnegative().default(0),
+  totalDurationMs: z.number().int().nonnegative().default(0),
+});
+
+const summarySchema = z.object({
+  text: z.string(),
+  throughMessageCount: z.number().int().nonnegative(),
+  updatedAt: z.string().min(1),
+});
+
+/**
+ * Schema v2. All new fields are optional so transcripts written by v1 still
+ * load and receive safe defaults.
+ */
 const sessionFileSchema = z.object({
   id: z.string().min(1),
   createdAt: z.string().min(1),
@@ -26,11 +44,16 @@ const sessionFileSchema = z.object({
       at: z.string().min(1),
     }),
   ),
+  agentId: z.string().min(1).optional(),
+  parentId: z.string().min(1).nullable().optional(),
+  depth: z.number().int().nonnegative().optional(),
+  summary: summarySchema.nullable().optional(),
+  usage: usageSchema.optional(),
 });
 
 /**
- * JSON transcript storage inside the sandbox's hidden `.agent` directory.
- * Writes are atomic (temp file + rename).
+ * JSON transcript storage inside AGENT_HOME/sessions. Writes are atomic
+ * (temp file + rename).
  */
 export class JsonSessionStore implements SessionStorePort {
   constructor(private readonly directory: string) {}
@@ -90,7 +113,9 @@ export class JsonSessionStore implements SessionStorePort {
       const id = path.basename(file, ".json");
       try {
         const session = await this.load(id);
-        if (session) {
+        // Sub-agent transcripts are resumable by id, but the default `resume`
+        // should always return the user's root conversation.
+        if (session && session.parentId === null) {
           return session;
         }
       } catch {
@@ -114,6 +139,8 @@ export class JsonSessionStore implements SessionStorePort {
             updatedAt: session.updatedAt,
             messageCount: session.messages.length,
             status: session.status,
+            agentId: session.agentId,
+            parentId: session.parentId,
           });
         }
       } catch {
@@ -159,6 +186,17 @@ export class JsonSessionStore implements SessionStorePort {
         at: message.at,
         ...(message.toolName !== undefined ? { toolName: message.toolName } : {}),
       })),
+      agentId: data.agentId ?? "assistant",
+      parentId: data.parentId ?? null,
+      depth: data.depth ?? 0,
+      summary: data.summary
+        ? {
+            text: data.summary.text,
+            throughMessageCount: data.summary.throughMessageCount,
+            updatedAt: data.summary.updatedAt,
+          }
+        : null,
+      usage: data.usage ?? emptySessionUsage(),
     };
     return AgentSession.restore(props);
   }
