@@ -71,6 +71,7 @@ export class RunAgentTool implements ToolPort {
       task: args.task,
       ...(args.context ? { context: args.context } : {}),
       ...(context.signal ? { signal: context.signal } : {}),
+      ...(context.channel ? { channel: context.channel } : {}),
     });
 
     const header = `Sub-agent "${args.agent}" ${result.status} · run ${result.runId} · session ${result.childSessionId} · ${result.steps} tool call(s).`;

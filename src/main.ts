@@ -1,6 +1,9 @@
 import { realpath } from "node:fs/promises";
 import path from "node:path";
-import { ApprovalService } from "./application/services/approval.service.js";
+import {
+  ApprovalService,
+  DenyAllApprovalPrompt,
+} from "./application/services/approval.service.js";
 import { ContextAssembler } from "./application/services/context-assembler.js";
 import { ModelRouter } from "./application/services/model-router.js";
 import { PolicyEnforcingSandbox } from "./application/services/policy-enforcing-sandbox.js";
@@ -9,12 +12,14 @@ import { CompactSessionUseCase } from "./application/usecases/compact-session.us
 import { ExecuteToolUseCase } from "./application/usecases/execute-tool.usecase.js";
 import { RunAgentTurnUseCase } from "./application/usecases/run-agent-turn.usecase.js";
 import { SubAgentRunner } from "./application/usecases/sub-agent-runner.js";
+import type { ApprovalPromptPort } from "./application/services/approval.service.js";
 import { PathPolicy } from "./domain/services/path-policy.js";
 import { ensureArcHome } from "./infrastructure/bootstrap/arc-home.js";
 import { ChatRepl } from "./infrastructure/cli/repl.js";
 import { printDoctorReport, runDoctor } from "./infrastructure/cli/doctor.js";
 import { InteractiveApprovalPrompt } from "./infrastructure/cli/interactive-approval.prompt.js";
 import { runSecretsCommand } from "./infrastructure/cli/secrets.js";
+import { runServeMode } from "./infrastructure/cli/serve.js";
 import { TerminalRenderer } from "./infrastructure/cli/terminal.renderer.js";
 import { loadConfig } from "./infrastructure/config/env.js";
 import { InMemoryEventBus } from "./infrastructure/events/in-memory-event-bus.js";
@@ -30,6 +35,8 @@ import { MarkdownAgentProfileRepository } from "./infrastructure/profiles/markdo
 import { NodeFsSandboxAdapter } from "./infrastructure/sandbox/node-fs-sandbox.adapter.js";
 import { NapiKeyringSecretStore } from "./infrastructure/secrets/napi-keyring.secret-store.js";
 import { MarkdownSkillRepository } from "./infrastructure/skills/markdown-skill.repository.js";
+import { TelegramApi } from "./infrastructure/telegram/telegram.api.js";
+import { TelegramApprovalPrompt } from "./infrastructure/telegram/telegram.approval.prompt.js";
 import { BraveWebSearchTool } from "./infrastructure/tools/brave-web-search.tool.js";
 import { ListFilesTool } from "./infrastructure/tools/list-files.tool.js";
 import { LoadSkillTool } from "./infrastructure/tools/load-skill.tool.js";
@@ -42,6 +49,7 @@ import { SearchFilesTool } from "./infrastructure/tools/search-files.tool.js";
 import { ShellTool } from "./infrastructure/tools/shell.tool.js";
 import { WebFetchTool } from "./infrastructure/tools/web-fetch.tool.js";
 import { WriteFileTool } from "./infrastructure/tools/write-file.tool.js";
+import { SECRET_ACCOUNTS } from "./shared/secret-accounts.js";
 import { errorMessage } from "./shared/text.js";
 
 async function main(): Promise<void> {
@@ -56,6 +64,7 @@ async function main(): Promise<void> {
 
   const config = loadConfig();
   const renderer = new TerminalRenderer();
+  const isServe = process.argv[2] === "serve";
 
   if (process.argv[2] === "doctor") {
     await ensureArcHome(config);
@@ -111,7 +120,36 @@ async function main(): Promise<void> {
   await skills.reload();
 
   const standingOrders = new MarkdownStandingOrders(config.standingOrdersPath);
-  const approvalPrompt = new InteractiveApprovalPrompt();
+
+  let interactiveApprovalPrompt: InteractiveApprovalPrompt | undefined;
+  let telegramApi: TelegramApi | undefined;
+  let telegramApprovalPrompt: TelegramApprovalPrompt | undefined;
+  let approvalPrompt: ApprovalPromptPort;
+
+  if (isServe) {
+    if (config.telegram.enabled) {
+      const token = await secretStore.get(SECRET_ACCOUNTS.telegramBotToken);
+      if (!token) {
+        renderer.error(
+          "Telegram is enabled but no bot token is stored. Run: arc secrets set telegram.bot-token",
+        );
+        process.exitCode = 1;
+        return;
+      }
+      telegramApi = new TelegramApi({ token });
+      telegramApprovalPrompt = new TelegramApprovalPrompt(telegramApi, {
+        ...(config.telegram.notifyChatId
+          ? { defaultChatId: config.telegram.notifyChatId }
+          : {}),
+      });
+      approvalPrompt = telegramApprovalPrompt;
+    } else {
+      approvalPrompt = new DenyAllApprovalPrompt();
+    }
+  } else {
+    interactiveApprovalPrompt = new InteractiveApprovalPrompt();
+    approvalPrompt = interactiveApprovalPrompt;
+  }
 
   const registry = new ToolRegistry();
   registry.register(new ListFilesTool(sandbox));
@@ -248,6 +286,23 @@ async function main(): Promise<void> {
     },
   );
 
+  if (isServe) {
+    await runServeMode({
+      config,
+      renderer,
+      secretStore,
+      decisionModel: llm,
+      runAgentTurn,
+      sessions: sessionStore,
+      profiles,
+      ...(telegramApi ? { telegramApi } : {}),
+      ...(telegramApprovalPrompt
+        ? { telegramApprovals: telegramApprovalPrompt }
+        : {}),
+    });
+    return;
+  }
+
   const repl = new ChatRepl({
     sessionStore,
     sandbox,
@@ -266,7 +321,9 @@ async function main(): Promise<void> {
     assembler,
     events,
     memoryAutoCapture: config.agent.memoryAutoCapture,
-    approvalPrompt,
+    ...(interactiveApprovalPrompt
+      ? { approvalPrompt: interactiveApprovalPrompt }
+      : {}),
   });
 
   await repl.start();

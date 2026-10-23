@@ -108,13 +108,24 @@ Inside the REPL:
 
 Anything else is sent to ARC as a task.
 
+Process commands:
+
+| Command | Purpose |
+| --- | --- |
+| `arc` | Start the interactive terminal REPL |
+| `arc serve` | Run Telegram chat and/or the read-only Gmail watcher |
+| `arc doctor` | Check paths, keyring, Ollama, models, email, and Telegram |
+| `arc secrets ...` | Manage OS-keyring entries |
+
 Secrets are managed outside the REPL:
 
 ```bash
 arc secrets list
 arc secrets set brave.api-key
-arc secrets check brave.api-key
-arc secrets delete brave.api-key
+arc secrets set gmail.app-password
+arc secrets set telegram.bot-token
+arc secrets check telegram.bot-token
+arc secrets delete telegram.bot-token
 ```
 
 `set` uses a hidden prompt. Secrets are never accepted as command-line
@@ -170,6 +181,55 @@ If `qwen2.5-coder:7b` spills to shared memory, lower `ARC_NUM_CTX` from 8192 to
 The built-in `coder` profile combines the coding and web tools with
 approval-gated shell access. Web content is always marked untrusted; the model
 is instructed not to follow instructions found inside pages.
+
+## Email and Telegram
+
+### Read-only Gmail notifications
+
+ARC can poll an unread Gmail mailbox and send a short notification when Tev1
+thinks a message deserves attention. It is deliberately one-way:
+
+- The mailbox is opened with IMAP `EXAMINE`/read-only mode.
+- Message bodies are fetched with `BODY.PEEK`, so ARC never sets `\Seen`.
+- There is no send, reply, delete, move, archive, or flag-changing code path.
+- Deduplication uses mailbox `UIDVALIDITY` plus the last processed UID, because
+  unread mail keeps appearing on every poll.
+- Tev1 sees only sender, subject, timestamp, and a short snippet. If Tev1 is
+  unavailable, ARC falls back to notifying so important mail is not silently
+  missed; the message is labelled `triage unavailable`.
+
+Setup:
+
+1. Enable 2-Step Verification on the Google account.
+2. Create a Google **app password** for ARC.
+3. Enable IMAP access in Gmail settings.
+4. Store the app password with `arc secrets set gmail.app-password`.
+5. Set `ARC_EMAIL_ENABLED=true` and `ARC_EMAIL_ADDRESS` in `.env`.
+6. Run `arc serve`.
+
+The first run processes up to `ARC_EMAIL_MAX_MESSAGES` recent unread messages.
+Later polls use the saved cursor. The state file contains only UIDVALIDITY and a
+UID; it does not store message bodies.
+
+### Telegram remote chat
+
+1. Create a private bot with [@BotFather](https://t.me/BotFather).
+2. Store the token with `arc secrets set telegram.bot-token`.
+3. Send a message to the bot, then use the Telegram `getUpdates` API or a
+   helper bot to find your numeric chat id.
+4. Set `ARC_TELEGRAM_ENABLED=true` and
+   `ARC_TELEGRAM_ALLOWED_CHAT_IDS=<your-id>` in `.env`.
+5. Run `arc serve` and message the bot.
+
+Only allowlisted numeric chat ids can use the bot. Each chat gets its own ARC
+session. `/new` starts a fresh conversation, `/status` shows the session,
+`/stop` cancels the active turn, and `/help` lists commands. Tool approvals are
+sent to the chat that owns the session. Reply with `yes <request-id>` or
+`no <request-id>`; session-scoped network tools also accept
+`session <request-id>`. Shell commands always require a fresh `yes`.
+
+Telegram bot chats are not end-to-end encrypted. ARC sends summaries,
+notifications, and short email snippets, never full mail bodies or secrets.
 
 ## Two separate directories
 
@@ -229,12 +289,24 @@ that owns the Credential Manager entries.
 4. Run `npm install`, `npm run build`, and `npm run doctor`.
 5. If you want web search, run `npm link` and then
    `arc secrets set brave.api-key`.
-6. Create a Task Scheduler task triggered **At log on**, with
-   `node C:\Users\Raunak Pandey\Projects\arc\out\main.js` as the action and the
-   project folder as the start-in directory.
-7. Keep the user session logged in and locked.
-8. Disable sleep and hibernation while on AC power.
-9. Verify `arc doctor` after a reboot.
+6. For email or Telegram, store the credentials in the same Windows account's
+   Credential Manager:
+
+   ```powershell
+   arc secrets set gmail.app-password
+   arc secrets set telegram.bot-token
+   arc doctor
+   ```
+
+7. Create a Task Scheduler task triggered **At log on**, with
+   `node C:\Users\Raunak Pandey\Projects\arc\out\main.js serve` as the action
+   and the project folder as the start-in directory. Use plain
+   `node ...\out\main.js` only if you want the interactive REPL at logon.
+8. Keep the user session logged in and locked.
+9. Disable sleep and hibernation while on AC power.
+10. Verify `arc doctor` and `arc serve` after a reboot. `arc serve` starts only
+    the channels enabled in `.env`; it refuses to start when both email and
+    Telegram are disabled.
 
 A per-user logon task is preferred over running as `SYSTEM`: `SYSTEM` may not
 be able to read the user's Credential Manager entries. Sleep, reboot, or logoff
@@ -266,9 +338,25 @@ Copy `.env.example` to `.env`. Canonical variables include:
 | `ARC_WEB_CACHE_TTL_MS` | `300000` |
 | `ARC_SHELL_TIMEOUT_MS` | `60000` |
 | `ARC_SHELL_MAX_OUTPUT_BYTES` | `65536` |
+| `ARC_EMAIL_ENABLED` | `false` |
+| `ARC_EMAIL_ADDRESS` | required when email is enabled |
+| `ARC_EMAIL_IMAP_HOST` | `imap.gmail.com` |
+| `ARC_EMAIL_IMAP_PORT` | `993` |
+| `ARC_EMAIL_MAILBOX` | `INBOX` |
+| `ARC_EMAIL_POLL_INTERVAL_MS` | `300000` |
+| `ARC_EMAIL_LOOKBACK_DAYS` | `2` |
+| `ARC_EMAIL_MAX_MESSAGES` | `10` |
+| `ARC_EMAIL_SNIPPET_CHARS` | `800` |
+| `ARC_EMAIL_TRIAGE_THRESHOLD` | `0.65` |
+| `ARC_EMAIL_NOTIFY_ON_TRIAGE_FAILURE` | `true` |
+| `ARC_TELEGRAM_ENABLED` | `false` |
+| `ARC_TELEGRAM_ALLOWED_CHAT_IDS` | required when Telegram is enabled |
+| `ARC_TELEGRAM_NOTIFY_CHAT_ID` | first allowed chat id |
+| `ARC_TELEGRAM_POLL_TIMEOUT_SEC` | `30` |
 
 Network tool approvals may be granted for the current session. Shell commands
-never inherit a session grant.
+never inherit a session grant. Email and Telegram are disabled by default; both
+require secrets in the OS keyring, not in `.env`.
 
 ## Skills and profiles
 
@@ -299,7 +387,9 @@ isolation, profile policy, approval fail-closed behaviour and session grants,
 Brave search, SSRF-safe fetch, workspace search/edit tools, shell timeouts and
 cancellation, Tev1 response parsing, model routing, OS-keyring injection,
 Windows path hardening, sandbox containment, memory, sessions, skills,
-events/redaction, secrets CLI, and `arc doctor`.
+events/redaction, secrets CLI, read-only Gmail source and UIDVALIDITY dedupe,
+email triage and watcher fallback, Telegram API/approval/chat routing, and
+`arc doctor`.
 
 ## Project layout
 
@@ -317,8 +407,8 @@ skills/             built-in Markdown skills
 - **Phase 4 (complete):** Brave web search/fetch, SSRF protection, workspace
   search/edit tools, approval-gated PowerShell, interactive CLI approvals, and
   the secrets CLI.
-- **Phase 5:** read-only Gmail IMAP ingestion, Tev1 notification triage,
-  Telegram remote chat and notifications.
+- **Phase 5 (complete):** read-only Gmail IMAP ingestion, Tev1 notification
+  triage, Telegram remote chat and notifications.
 - **Phase 6:** read-only YouTube and Instagram performance analysis, content
   suggestions.
 - **Phase 7:** always-on Windows hardening, installer or standalone build,

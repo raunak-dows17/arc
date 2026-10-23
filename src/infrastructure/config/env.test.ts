@@ -85,6 +85,59 @@ describe("loadConfig", () => {
     );
   });
 
+  it("configures read-only email and Telegram chat", () => {
+    const config = loadConfig({
+      ARC_HOME: "./.arc",
+      ARC_WORKSPACE: "./workspace",
+      ARC_EMAIL_ENABLED: "true",
+      ARC_EMAIL_ADDRESS: "raunak@example.com",
+      ARC_EMAIL_POLL_INTERVAL_MS: "120000",
+      ARC_EMAIL_MAX_MESSAGES: "5",
+      ARC_EMAIL_TRIAGE_THRESHOLD: "0.7",
+      ARC_TELEGRAM_ENABLED: "true",
+      ARC_TELEGRAM_ALLOWED_CHAT_IDS: "123, -456",
+    } as NodeJS.ProcessEnv);
+
+    assert.equal(config.email.enabled, true);
+    assert.equal(config.email.address, "raunak@example.com");
+    assert.equal(config.email.pollIntervalMs, 120_000);
+    assert.equal(config.email.maxMessages, 5);
+    assert.equal(config.email.triageThreshold, 0.7);
+    assert.equal(config.telegram.enabled, true);
+    assert.deepEqual(config.telegram.allowedChatIds, ["123", "-456"]);
+    assert.equal(config.telegram.notifyChatId, "123");
+  });
+
+  it("rejects incomplete email and Telegram configuration", () => {
+    assert.throws(
+      () =>
+        loadConfig({
+          ARC_HOME: "./.arc",
+          ARC_WORKSPACE: "./workspace",
+          ARC_EMAIL_ENABLED: "true",
+        } as NodeJS.ProcessEnv),
+      /ARC_EMAIL_ADDRESS is required/,
+    );
+    assert.throws(
+      () =>
+        loadConfig({
+          ARC_HOME: "./.arc",
+          ARC_WORKSPACE: "./workspace",
+          ARC_TELEGRAM_ENABLED: "true",
+        } as NodeJS.ProcessEnv),
+      /ARC_TELEGRAM_ALLOWED_CHAT_IDS/,
+    );
+    assert.throws(
+      () =>
+        loadConfig({
+          ARC_HOME: "./.arc",
+          ARC_WORKSPACE: "./workspace",
+          ARC_TELEGRAM_ALLOWED_CHAT_IDS: "not-a-number",
+        } as NodeJS.ProcessEnv),
+      /Invalid Telegram chat id/,
+    );
+  });
+
   it("configures bounded web and shell tools", () => {
     const defaults = loadConfig({
       ARC_HOME: "./.arc",

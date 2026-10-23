@@ -135,6 +135,7 @@ export class SubAgentRunner implements SubAgentRunnerPort {
         profile,
         prompt,
         signal,
+        ...(request.channel ? { channel: request.channel } : {}),
       });
       const summary = truncateText(answer, 2_500);
       const steps = child.messages.filter((message) => message.role === "tool").length;

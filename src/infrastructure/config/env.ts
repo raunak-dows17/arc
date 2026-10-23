@@ -2,7 +2,16 @@ import "dotenv/config";
 import path from "node:path";
 import { z } from "zod";
 
-const optionalString = z.string().min(1).optional();
+const optionalString = z.preprocess(
+  (value) =>
+    typeof value === "string" && value.trim() === "" ? undefined : value,
+  z.string().min(1).optional(),
+);
+const optionalEmail = z.preprocess(
+  (value) =>
+    typeof value === "string" && value.trim() === "" ? undefined : value,
+  z.string().trim().email().optional(),
+);
 const optionalBoolean = z.enum(["true", "false", "1", "0"]).optional();
 
 const envSchema = z.object({
@@ -73,6 +82,23 @@ const envSchema = z.object({
   ARC_WEB_MAX_RESULTS: z.coerce.number().int().min(1).max(10).optional(),
   ARC_SHELL_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(300_000).optional(),
   ARC_SHELL_MAX_OUTPUT_BYTES: z.coerce.number().int().min(4_000).max(1_000_000).optional(),
+
+  ARC_EMAIL_ENABLED: optionalBoolean,
+  ARC_EMAIL_ADDRESS: optionalEmail,
+  ARC_EMAIL_IMAP_HOST: optionalString,
+  ARC_EMAIL_IMAP_PORT: z.coerce.number().int().min(1).max(65_535).optional(),
+  ARC_EMAIL_MAILBOX: optionalString,
+  ARC_EMAIL_POLL_INTERVAL_MS: z.coerce.number().int().min(60_000).max(3_600_000).optional(),
+  ARC_EMAIL_LOOKBACK_DAYS: z.coerce.number().int().min(1).max(30).optional(),
+  ARC_EMAIL_MAX_MESSAGES: z.coerce.number().int().min(1).max(50).optional(),
+  ARC_EMAIL_SNIPPET_CHARS: z.coerce.number().int().min(100).max(4_000).optional(),
+  ARC_EMAIL_TRIAGE_THRESHOLD: z.coerce.number().min(0).max(1).optional(),
+  ARC_EMAIL_NOTIFY_ON_TRIAGE_FAILURE: optionalBoolean,
+
+  ARC_TELEGRAM_ENABLED: optionalBoolean,
+  ARC_TELEGRAM_ALLOWED_CHAT_IDS: optionalString,
+  ARC_TELEGRAM_NOTIFY_CHAT_ID: optionalString,
+  ARC_TELEGRAM_POLL_TIMEOUT_SEC: z.coerce.number().int().min(5).max(50).optional(),
 });
 
 export interface OllamaConfig {
@@ -124,6 +150,25 @@ export interface AppConfig {
     timeoutMs: number;
     maxOutputBytes: number;
   };
+  email: {
+    enabled: boolean;
+    address: string;
+    imapHost: string;
+    imapPort: number;
+    mailbox: string;
+    pollIntervalMs: number;
+    lookbackDays: number;
+    maxMessages: number;
+    snippetChars: number;
+    triageThreshold: number;
+    notifyOnTriageFailure: boolean;
+  };
+  telegram: {
+    enabled: boolean;
+    allowedChatIds: string[];
+    notifyChatId?: string;
+    pollTimeoutSec: number;
+  };
   /** Private ARC state: memory, skills, profiles, sessions, audit. */
   arcHome: string;
   /** The filesystem workspace exposed to file tools. */
@@ -161,6 +206,33 @@ export function loadConfig(raw: NodeJS.ProcessEnv = process.env): AppConfig {
   const workspaceDir = path.resolve(
     env.ARC_WORKSPACE ?? env.WORKSPACE_DIR ?? env.SANDBOX_DIR ?? "./sandbox",
   );
+  const emailEnabled = booleanValue(env.ARC_EMAIL_ENABLED, false);
+  const emailAddress = env.ARC_EMAIL_ADDRESS ?? "";
+  if (emailEnabled && !emailAddress) {
+    throw new Error(
+      "ARC_EMAIL_ADDRESS is required when ARC_EMAIL_ENABLED=true.",
+    );
+  }
+  const telegramEnabled = booleanValue(env.ARC_TELEGRAM_ENABLED, false);
+  const allowedChatIds = parseChatIds(
+    env.ARC_TELEGRAM_ALLOWED_CHAT_IDS ?? "",
+  );
+  if (telegramEnabled && allowedChatIds.length === 0) {
+    throw new Error(
+      "ARC_TELEGRAM_ALLOWED_CHAT_IDS must contain at least one chat id when ARC_TELEGRAM_ENABLED=true.",
+    );
+  }
+  const notifyChatId = env.ARC_TELEGRAM_NOTIFY_CHAT_ID?.trim() || undefined;
+  if (
+    notifyChatId &&
+    allowedChatIds.length > 0 &&
+    !allowedChatIds.includes(notifyChatId)
+  ) {
+    throw new Error(
+      "ARC_TELEGRAM_NOTIFY_CHAT_ID must be one of ARC_TELEGRAM_ALLOWED_CHAT_IDS.",
+    );
+  }
+  const effectiveNotifyChatId = notifyChatId ?? allowedChatIds[0];
 
   if (
     samePath(arcHome, workspaceDir) ||
@@ -231,6 +303,30 @@ export function loadConfig(raw: NodeJS.ProcessEnv = process.env): AppConfig {
       timeoutMs: env.ARC_SHELL_TIMEOUT_MS ?? 60_000,
       maxOutputBytes: env.ARC_SHELL_MAX_OUTPUT_BYTES ?? 64 * 1024,
     },
+    email: {
+      enabled: emailEnabled,
+      address: emailAddress,
+      imapHost: env.ARC_EMAIL_IMAP_HOST ?? "imap.gmail.com",
+      imapPort: env.ARC_EMAIL_IMAP_PORT ?? 993,
+      mailbox: env.ARC_EMAIL_MAILBOX ?? "INBOX",
+      pollIntervalMs: env.ARC_EMAIL_POLL_INTERVAL_MS ?? 5 * 60_000,
+      lookbackDays: env.ARC_EMAIL_LOOKBACK_DAYS ?? 2,
+      maxMessages: env.ARC_EMAIL_MAX_MESSAGES ?? 10,
+      snippetChars: env.ARC_EMAIL_SNIPPET_CHARS ?? 800,
+      triageThreshold: env.ARC_EMAIL_TRIAGE_THRESHOLD ?? 0.65,
+      notifyOnTriageFailure: booleanValue(
+        env.ARC_EMAIL_NOTIFY_ON_TRIAGE_FAILURE,
+        true,
+      ),
+    },
+    telegram: {
+      enabled: telegramEnabled,
+      allowedChatIds,
+      ...(effectiveNotifyChatId
+        ? { notifyChatId: effectiveNotifyChatId }
+        : {}),
+      pollTimeoutSec: env.ARC_TELEGRAM_POLL_TIMEOUT_SEC ?? 30,
+    },
     arcHome,
     workspaceDir,
     sandboxDir: workspaceDir,
@@ -251,6 +347,20 @@ function defaultArcHome(): string {
     return path.join(localAppData, "ARC", "agent-home");
   }
   return path.resolve(".arc");
+}
+
+function parseChatIds(value: string): string[] {
+  const entries = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const invalid = entries.filter((entry) => !/^-?\d+$/.test(entry));
+  if (invalid.length > 0) {
+    throw new Error(
+      `Invalid Telegram chat id(s): ${invalid.join(", ")}. Use numeric ids separated by commas.`,
+    );
+  }
+  return [...new Set(entries)];
 }
 
 function booleanValue(

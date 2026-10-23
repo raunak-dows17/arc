@@ -32,3 +32,7 @@ export class SkillError extends AgentError {}
 export class MemoryStoreError extends AgentError {}
 
 export class SubAgentError extends AgentError {}
+
+export class EmailSourceError extends AgentError {}
+
+export class TelegramError extends AgentError {}

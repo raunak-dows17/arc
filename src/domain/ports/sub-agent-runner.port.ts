@@ -1,4 +1,5 @@
 import type { SessionUsage } from "../entities/agent-session.js";
+import type { ApprovalChannel } from "./approval.port.js";
 
 export interface SubAgentRequest {
   parentSessionId: string;
@@ -8,6 +9,8 @@ export interface SubAgentRequest {
   task: string;
   context?: string;
   signal?: AbortSignal;
+  /** Keep approvals on the same human channel as the parent turn. */
+  channel?: ApprovalChannel;
 }
 
 export interface SubAgentResult {

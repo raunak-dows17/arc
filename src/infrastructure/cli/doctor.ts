@@ -99,6 +99,8 @@ export async function runDoctor(
     detail: keyring.message,
   });
   checks.push(await braveCheck(secretStore));
+  checks.push(await emailCheck(config, secretStore));
+  checks.push(await telegramCheck(config, secretStore));
 
   checks.push(await ollamaCheck(config, fetchImpl));
   checks.push(await modelCheck(config, fetchImpl));
@@ -195,6 +197,74 @@ async function braveCheck(
       label: "Brave Search",
       status: "warn",
       detail: `Could not read the Brave API key: ${errorMessage(error)}`,
+    };
+  }
+}
+
+async function emailCheck(
+  config: AppConfig,
+  secretStore: SecretStorePort,
+): Promise<DoctorCheck> {
+  if (!config.email.enabled) {
+    return {
+      id: "email",
+      label: "Gmail IMAP",
+      status: "ok",
+      detail: "Disabled. Set ARC_EMAIL_ENABLED=true to enable read-only polling.",
+    };
+  }
+  try {
+    const password = await secretStore.get(SECRET_ACCOUNTS.gmailAppPassword);
+    return {
+      id: "email",
+      label: "Gmail IMAP",
+      status: password && config.email.address ? "ok" : "warn",
+      detail:
+        password && config.email.address
+          ? `Read-only polling configured for ${config.email.address}.`
+          : `Missing ${config.email.address ? "gmail.app-password" : "ARC_EMAIL_ADDRESS"}.`,
+    };
+  } catch (error) {
+    return {
+      id: "email",
+      label: "Gmail IMAP",
+      status: "warn",
+      detail: `Could not read the Gmail app password: ${errorMessage(error)}`,
+    };
+  }
+}
+
+async function telegramCheck(
+  config: AppConfig,
+  secretStore: SecretStorePort,
+): Promise<DoctorCheck> {
+  if (!config.telegram.enabled) {
+    return {
+      id: "telegram",
+      label: "Telegram",
+      status: "ok",
+      detail: "Disabled. Set ARC_TELEGRAM_ENABLED=true to enable remote chat.",
+    };
+  }
+  try {
+    const token = await secretStore.get(SECRET_ACCOUNTS.telegramBotToken);
+    const configured =
+      Boolean(token) &&
+      config.telegram.allowedChatIds.length > 0;
+    return {
+      id: "telegram",
+      label: "Telegram",
+      status: configured ? "ok" : "warn",
+      detail: configured
+        ? `Bot token present; ${config.telegram.allowedChatIds.length} allowed chat(s).`
+        : "Missing bot token or allowed chat ids. Run: arc secrets set telegram.bot-token",
+    };
+  } catch (error) {
+    return {
+      id: "telegram",
+      label: "Telegram",
+      status: "warn",
+      detail: `Could not read the Telegram bot token: ${errorMessage(error)}`,
     };
   }
 }
