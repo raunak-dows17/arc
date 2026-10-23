@@ -1,47 +1,49 @@
-export type ModelTask = "main" | "research" | "coding" | "compaction";
+import type {
+  ModelSelection,
+  ModelSettings,
+} from "../../infrastructure/config/models.js";
 
-export interface ModelCatalog {
-  main: string;
-  research: string;
-  coding: string;
-  decision: string;
-}
+export type ModelTask =
+  | "main"
+  | "research"
+  | "coding"
+  | "triage"
+  | "compaction";
+
+export type ModelCatalog = ModelSettings["roles"];
 
 /**
- * Chooses a local model by task. The router does not load models itself;
- * callers pass the selected name to the Ollama adapter, and the serialized
- * adapter guarantees only one inference runs at a time.
+ * Chooses a provider/model pair by task. The router does not create provider
+ * clients; the routing adapter resolves the pair at call time.
  */
 export class ModelRouter {
   constructor(private readonly catalog: ModelCatalog) {}
 
-  resolve(task: ModelTask): string {
-    switch (task) {
-      case "coding":
-        return this.catalog.coding;
-      case "research":
-        return this.catalog.research;
-      case "compaction":
-      case "main":
-        return this.catalog.main;
-    }
+  resolve(task: ModelTask): ModelSelection {
+    return { ...this.catalog[task] };
   }
 
-  resolveForProfile(profileId: string): string {
+  resolveForProfile(profileId: string): ModelSelection {
     if (["coder", "coding", "engineer", "developer"].includes(profileId)) {
-      return this.catalog.coding;
+      return this.resolve("coding");
     }
     if (["research", "researcher", "analyst"].includes(profileId)) {
-      return this.catalog.research;
+      return this.resolve("research");
     }
-    return this.catalog.main;
+    return this.resolve("main");
   }
 
-  get decisionModel(): string {
-    return this.catalog.decision;
+  get decisionModel(): ModelSelection {
+    return this.resolve("triage");
   }
 
   snapshot(): Readonly<ModelCatalog> {
-    return { ...this.catalog };
+    return {
+      main: { ...this.catalog.main },
+      research: { ...this.catalog.research },
+      coding: { ...this.catalog.coding },
+      triage: { ...this.catalog.triage },
+      compaction: { ...this.catalog.compaction },
+    };
   }
 }

@@ -92,12 +92,15 @@ export class RunAgentTurnUseCase {
         let usage;
         try {
           const context = await this.options.assembler.assemble(session, profile);
+          const selection = this.options.modelRouter?.resolveForProfile(
+            profile.id,
+          );
           const result = await this.llm.generateDecision({
             systemPrompt: context.systemPrompt,
             messages: context.messages,
             tools: context.tools,
-            ...(this.options.modelRouter
-              ? { model: this.options.modelRouter.resolveForProfile(profile.id) }
+            ...(selection
+              ? { provider: selection.provider, model: selection.model }
               : {}),
             ...(input.signal ? { signal: input.signal } : {}),
           });

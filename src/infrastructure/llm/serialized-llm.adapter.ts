@@ -14,10 +14,9 @@ import type {
 import { DecisionModelError } from "../../domain/errors/agent.errors.js";
 
 /**
- * Local models are memory-heavy and Ollama handles concurrent requests poorly
- * on a 16 GB machine. This decorator funnels every model call through a single
- * promise chain so the parent turn, sub-agents, and the decision model never
- * inference at once.
+ * Free tiers and local models both have tight concurrency budgets. This
+ * decorator funnels every model call through a single promise chain so the
+ * parent turn, sub-agents, and the decision model never infer at once.
  */
 export class SerializedLlmAdapter
   implements LLMPort, TextGenerationPort, DecisionModelPort
@@ -51,7 +50,7 @@ export class SerializedLlmAdapter
       request.signal?.throwIfAborted();
       if (!this.decisionModel) {
         throw new DecisionModelError(
-          "No decision model is configured. Install Ollama 0.35+ and pull tev1:0.8b.",
+          "No decision model is configured. Run `arc setup` to select a triage model.",
         );
       }
       return this.decisionModel.ask(request);

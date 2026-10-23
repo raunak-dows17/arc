@@ -8,6 +8,7 @@ import type {
   LLMPort,
   LlmDecisionResult,
   LlmRequest,
+  TextGenerationOptions,
   TextGenerationPort,
   TextGenerationResult,
 } from "../../domain/ports/llm.port.js";
@@ -20,6 +21,7 @@ const chatResponseSchema = z.object({
     content: z.string(),
   }),
   done: z.boolean().optional(),
+  done_reason: z.string().optional(),
   prompt_eval_count: z.number().int().nonnegative().optional(),
   eval_count: z.number().int().nonnegative().optional(),
   total_duration: z.number().nonnegative().optional(),
@@ -127,6 +129,11 @@ export class OllamaLlmAdapter implements LLMPort, TextGenerationPort {
   }
 
   async generateDecision(request: LlmRequest): Promise<LlmDecisionResult> {
+    if (request.provider && request.provider !== "ollama") {
+      throw new LlmError(
+        `Ollama adapter cannot serve provider "${request.provider}".`,
+      );
+    }
     const format = buildDecisionFormat(request.tools.map((tool) => tool.name));
     const baseMessages = [
       { role: "system" as const, content: request.systemPrompt },
@@ -149,6 +156,7 @@ export class OllamaLlmAdapter implements LLMPort, TextGenerationPort {
                 content: [
                   `Your previous response was rejected: ${lastParseError.message}`,
                   "Respond again with exactly one valid JSON object using only the keys thought, tool, and final.",
+                  "Keep thought to one short sentence or an empty string. Do not repeat the user request.",
                 ].join("\n"),
               },
             ];
@@ -169,7 +177,12 @@ export class OllamaLlmAdapter implements LLMPort, TextGenerationPort {
         };
       } catch (error) {
         if (error instanceof DecisionParseError) {
-          lastParseError = error;
+          lastParseError =
+            data.done_reason === "length"
+              ? new DecisionParseError(
+                  `${error.message} (Ollama stopped because it reached the output-token limit)`,
+                )
+              : error;
           continue;
         }
         throw error;
@@ -183,12 +196,13 @@ export class OllamaLlmAdapter implements LLMPort, TextGenerationPort {
 
   async generateText(
     prompt: string,
-    options: {
-      systemPrompt?: string;
-      model?: string;
-      signal?: AbortSignal;
-    } = {},
+    options: TextGenerationOptions = {},
   ): Promise<TextGenerationResult> {
+    if (options.provider && options.provider !== "ollama") {
+      throw new LlmError(
+        `Ollama adapter cannot serve provider "${options.provider}".`,
+      );
+    }
     const messages = [
       ...(options.systemPrompt
         ? [{ role: "system" as const, content: options.systemPrompt }]
@@ -201,6 +215,7 @@ export class OllamaLlmAdapter implements LLMPort, TextGenerationPort {
         model: options.model ?? this.config.model,
         messages,
         stream: false,
+        ...(options.json ? { format: "json" } : {}),
         think: false,
         keep_alive: this.config.keepAlive,
         options: {

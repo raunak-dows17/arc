@@ -84,6 +84,12 @@ describe("parseDecision", () => {
     const extracted = extractJsonObject("```json\n{\"a\":1}\n```");
     assert.deepEqual(JSON.parse(extracted), { a: 1 });
   });
+
+  it("repairs an unterminated string caused by an output limit", () => {
+    const truncated =
+      '{"thought":"Checking the file","tool":null,"final":"The answer is';
+    assert.equal(parseDecision(truncated).finalAnswer, "The answer is");
+  });
 });
 
 describe("buildDecisionFormat", () => {

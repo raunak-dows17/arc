@@ -3,34 +3,48 @@ import { describe, it } from "node:test";
 import { ModelRouter } from "./services/model-router.js";
 
 const router = new ModelRouter({
-  main: "qwen3:8b",
-  research: "qwen3:8b",
-  coding: "qwen2.5-coder:7b",
-  decision: "tev1:0.8b",
+  main: { provider: "google", model: "gemini-2.5-flash" },
+  research: { provider: "google", model: "gemini-2.5-flash" },
+  coding: { provider: "groq", model: "qwen/qwen3-32b" },
+  triage: { provider: "google", model: "gemini-2.5-flash-lite" },
+  compaction: { provider: "google", model: "gemini-2.5-flash-lite" },
 });
 
 describe("ModelRouter", () => {
   it("routes explicit tasks", () => {
-    assert.equal(router.resolve("main"), "qwen3:8b");
-    assert.equal(router.resolve("research"), "qwen3:8b");
-    assert.equal(router.resolve("coding"), "qwen2.5-coder:7b");
-    assert.equal(router.resolve("compaction"), "qwen3:8b");
+    assert.deepEqual(router.resolve("main"), {
+      provider: "google",
+      model: "gemini-2.5-flash",
+    });
+    assert.deepEqual(router.resolve("coding"), {
+      provider: "groq",
+      model: "qwen/qwen3-32b",
+    });
+    assert.deepEqual(router.resolve("triage"), {
+      provider: "google",
+      model: "gemini-2.5-flash-lite",
+    });
   });
 
   it("routes known profiles", () => {
-    assert.equal(router.resolveForProfile("arc"), "qwen3:8b");
-    assert.equal(router.resolveForProfile("coder"), "qwen2.5-coder:7b");
-    assert.equal(router.resolveForProfile("researcher"), "qwen3:8b");
-    assert.equal(router.resolveForProfile("reviewer"), "qwen3:8b");
+    assert.deepEqual(router.resolveForProfile("arc"), {
+      provider: "google",
+      model: "gemini-2.5-flash",
+    });
+    assert.deepEqual(router.resolveForProfile("coder"), {
+      provider: "groq",
+      model: "qwen/qwen3-32b",
+    });
+    assert.deepEqual(router.resolveForProfile("researcher"), {
+      provider: "google",
+      model: "gemini-2.5-flash",
+    });
   });
 
   it("exposes the decision model separately", () => {
-    assert.equal(router.decisionModel, "tev1:0.8b");
-    assert.deepEqual(router.snapshot(), {
-      main: "qwen3:8b",
-      research: "qwen3:8b",
-      coding: "qwen2.5-coder:7b",
-      decision: "tev1:0.8b",
+    assert.deepEqual(router.decisionModel, {
+      provider: "google",
+      model: "gemini-2.5-flash-lite",
     });
   });
 });

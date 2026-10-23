@@ -48,7 +48,10 @@ export async function runSecretsCommand(
     output(`Invalid account name "${account}".\n`);
     return 1;
   }
-  if (!(KNOWN_SECRET_ACCOUNTS as readonly string[]).includes(account)) {
+  if (
+    !(KNOWN_SECRET_ACCOUNTS as readonly string[]).includes(account) &&
+    !/^provider\.[A-Za-z0-9._-]+\.api-key$/.test(account)
+  ) {
     output(
       `Unknown account "${account}". Known accounts:\n${KNOWN_SECRET_ACCOUNTS.map((name) => `  ${name}`).join("\n")}\n`,
     );
@@ -134,15 +137,15 @@ function printUsage(output: (text: string) => void): void {
       "Known accounts:",
       ...KNOWN_SECRET_ACCOUNTS.map((account) => `  ${account}`),
       "",
-      "Secrets are stored in the OS credential store: Windows Credential Manager",
-      "in production, macOS Keychain during development. Never pass a secret as",
-      "an argument; it would be recorded in shell history.",
+      "Secrets are stored in the OS credential store: Windows Credential Manager,",
+      "macOS Keychain, or Linux Secret Service. Never pass a secret as an",
+      "argument; it would be recorded in shell history.",
       "",
     ].join("\n"),
   );
 }
 
-async function readSecretFromInput(label: string): Promise<string> {
+export async function readSecretFromInput(label: string): Promise<string> {
   if (!process.stdin.isTTY) {
     return readPipedSecret();
   }

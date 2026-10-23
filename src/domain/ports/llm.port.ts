@@ -11,6 +11,8 @@ export interface LlmRequest {
   systemPrompt: string;
   messages: readonly LlmMessage[];
   tools: readonly ToolDefinition[];
+  /** Optional provider override selected by the application-level router. */
+  provider?: string;
   /** Optional model override selected by the application-level router. */
   model?: string;
   signal?: AbortSignal;
@@ -36,8 +38,12 @@ export interface TextGenerationResult {
 
 export interface TextGenerationOptions {
   systemPrompt?: string;
+  /** Optional provider override selected by the application-level router. */
+  provider?: string;
   /** Optional model override selected by the application-level router. */
   model?: string;
+  /** Ask the provider for JSON output when it supports a JSON mode. */
+  json?: boolean;
   signal?: AbortSignal;
 }
 

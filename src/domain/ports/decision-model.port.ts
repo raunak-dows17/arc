@@ -68,8 +68,9 @@ export interface DecisionResult {
 }
 
 /**
- * Fast local classification only. This is intentionally separate from the
- * tool-calling LLM port because decision models do not generate tool JSON.
+ * Fast classification port. It is intentionally separate from the tool-calling
+ * LLM port because decision models do not generate agent tool JSON. It can be
+ * backed by local Tev1 or a cheap cloud model.
  */
 export interface DecisionModelPort {
   ask(request: DecisionRequest): Promise<DecisionResult>;

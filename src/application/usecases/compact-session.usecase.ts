@@ -1,6 +1,7 @@
 import type { AgentSession } from "../../domain/entities/agent-session.js";
 import type { TextGenerationPort } from "../../domain/ports/llm.port.js";
 import { truncateText } from "../../shared/text.js";
+import type { ModelRouter } from "../services/model-router.js";
 
 export interface CompactSessionOptions {
   /** Compact when the working transcript exceeds this many characters. */
@@ -8,6 +9,7 @@ export interface CompactSessionOptions {
   /** Always keep this many newest messages verbatim. */
   keepRecentMessages: number;
   maxSummaryChars?: number;
+  modelRouter?: ModelRouter;
 }
 
 export interface CompactionResult {
@@ -91,9 +93,13 @@ export class CompactSessionUseCase {
     signal?.throwIfAborted();
 
     try {
+      const selection = this.options.modelRouter?.resolve("compaction");
       const result = await this.llm.generateText(prompt, {
         systemPrompt:
           "You compress conversation history. Return only the summary text.",
+        ...(selection
+          ? { provider: selection.provider, model: selection.model }
+          : {}),
         ...(signal ? { signal } : {}),
       });
       const summary = truncateText(

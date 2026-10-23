@@ -519,7 +519,7 @@ export class ChatRepl {
 
       case "/model":
         this.deps.renderer.info(
-          `Model: ${this.deps.modelName} (configure ARC_MODEL in .env)`,
+          `Model: ${this.deps.modelName} (change with arc setup or arc models set)`,
         );
         if (argument) {
           this.deps.renderer.warn(

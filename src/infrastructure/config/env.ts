@@ -1,6 +1,13 @@
 import "dotenv/config";
+import { fileURLToPath } from "node:url";
+import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import {
+  loadModelSettings,
+  modelSettingsPath,
+  type ModelSettings,
+} from "./models.js";
 
 const optionalString = z.preprocess(
   (value) =>
@@ -19,6 +26,7 @@ const envSchema = z.object({
   // accepted so existing installations can migrate without losing state.
   ARC_OLLAMA_BASE_URL: optionalString,
   OLLAMA_BASE_URL: optionalString,
+  ARC_MODEL_PROVIDER: optionalString,
   ARC_MODEL: optionalString,
   OLLAMA_MODEL: optionalString,
   ARC_CODING_MODEL: optionalString,
@@ -118,6 +126,9 @@ export interface OllamaConfig {
 
 export interface AppConfig {
   ollama: OllamaConfig;
+  /** Provider-neutral routing loaded from ARC_HOME/models.json. */
+  models: ModelSettings;
+  modelSettingsPath: string;
   agent: {
     defaultProfileId: string;
     maxSteps: number;
@@ -200,12 +211,26 @@ export function loadConfig(raw: NodeJS.ProcessEnv = process.env): AppConfig {
     env.OLLAMA_BASE_URL ??
     "http://127.0.0.1:11434";
   const mainModel = env.ARC_MODEL ?? env.OLLAMA_MODEL ?? "qwen3:8b";
+  const codingModel = env.ARC_CODING_MODEL ?? "qwen2.5-coder:7b";
+  const researchModel = env.ARC_RESEARCH_MODEL ?? mainModel;
+  const decisionModel = env.ARC_DECISION_MODEL ?? "tev1:0.8b";
   const arcHome = path.resolve(
     env.ARC_HOME ?? env.AGENT_HOME ?? defaultArcHome(),
   );
   const workspaceDir = path.resolve(
     env.ARC_WORKSPACE ?? env.WORKSPACE_DIR ?? env.SANDBOX_DIR ?? "./sandbox",
   );
+  const models = loadModelSettings({
+    arcHome,
+    env: raw,
+    legacy: {
+      ollamaBaseUrl: baseUrl,
+      main: mainModel,
+      research: researchModel,
+      coding: codingModel,
+      decision: decisionModel,
+    },
+  });
   const emailEnabled = booleanValue(env.ARC_EMAIL_ENABLED, false);
   const emailAddress = env.ARC_EMAIL_ADDRESS ?? "";
   if (emailEnabled && !emailAddress) {
@@ -247,9 +272,9 @@ export function loadConfig(raw: NodeJS.ProcessEnv = process.env): AppConfig {
     ollama: {
       baseUrl,
       model: mainModel,
-      codingModel: env.ARC_CODING_MODEL ?? "qwen2.5-coder:7b",
-      researchModel: env.ARC_RESEARCH_MODEL ?? mainModel,
-      decisionModel: env.ARC_DECISION_MODEL ?? "tev1:0.8b",
+      codingModel,
+      researchModel,
+      decisionModel,
       decisionBaseUrl: env.ARC_DECISION_BASE_URL ?? baseUrl,
       numCtx: env.ARC_NUM_CTX ?? env.OLLAMA_NUM_CTX ?? 8192,
       numPredict: env.ARC_NUM_PREDICT ?? env.OLLAMA_NUM_PREDICT ?? 1024,
@@ -327,6 +352,8 @@ export function loadConfig(raw: NodeJS.ProcessEnv = process.env): AppConfig {
         : {}),
       pollTimeoutSec: env.ARC_TELEGRAM_POLL_TIMEOUT_SEC ?? 30,
     },
+    models,
+    modelSettingsPath: modelSettingsPath(arcHome),
     arcHome,
     workspaceDir,
     sandboxDir: workspaceDir,
@@ -335,18 +362,35 @@ export function loadConfig(raw: NodeJS.ProcessEnv = process.env): AppConfig {
     memoryDir: path.join(arcHome, "memory"),
     skillsDir: path.join(arcHome, "skills"),
     agentsDir: path.join(arcHome, "agents"),
-    builtinSkillsDir: path.resolve("skills"),
+    builtinSkillsDir: path.join(packageRoot(), "skills"),
     auditLogPath: path.join(arcHome, "audit.jsonl"),
     standingOrdersPath: path.join(arcHome, "STANDING_ORDERS.md"),
   };
 }
 
 function defaultArcHome(): string {
-  const localAppData = process.env.LOCALAPPDATA;
-  if (process.platform === "win32" && localAppData) {
-    return path.join(localAppData, "ARC", "agent-home");
+  const home = os.homedir();
+  if (process.platform === "win32") {
+    const base =
+      process.env.LOCALAPPDATA ??
+      process.env.APPDATA ??
+      path.join(home, "AppData", "Local");
+    return path.join(base, "ARC", "agent-home");
   }
-  return path.resolve(".arc");
+  if (process.platform === "darwin") {
+    return path.join(home, "Library", "Application Support", "ARC", "agent-home");
+  }
+  const stateHome =
+    process.env.XDG_STATE_HOME ?? path.join(home, ".local", "state");
+  return path.join(stateHome, "arc", "agent-home");
+}
+
+/**
+ * Built-in skills ship next to the installed package, not next to the user's
+ * current project. This keeps `arc` working when launched from any folder.
+ */
+function packageRoot(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 }
 
 function parseChatIds(value: string): string[] {

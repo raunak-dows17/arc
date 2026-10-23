@@ -1,3 +1,4 @@
+import { jsonrepair } from "jsonrepair";
 import { z } from "zod";
 import { DecisionParseError } from "../../domain/errors/agent.errors.js";
 import { AgentDecision } from "../../domain/value-objects/agent-decision.js";
@@ -10,7 +11,7 @@ const toolCallSchema = z.object({
 
 const decisionSchema = z
   .object({
-    thought: z.string().max(4000).default(""),
+    thought: z.string().max(2000).default(""),
     tool: toolCallSchema.nullable().default(null),
     final: z.string().nullable().default(null),
   })
@@ -27,7 +28,7 @@ export function buildDecisionFormat(
     return {
       type: "object",
       properties: {
-        thought: { type: "string" },
+        thought: { type: "string", maxLength: 400 },
         tool: { type: "null" },
         final: { type: "string" },
       },
@@ -54,7 +55,7 @@ export function buildDecisionFormat(
       {
         type: "object",
         properties: {
-          thought: { type: "string" },
+          thought: { type: "string", maxLength: 400 },
           tool: toolCall,
           final: { type: "null" },
         },
@@ -64,7 +65,7 @@ export function buildDecisionFormat(
       {
         type: "object",
         properties: {
-          thought: { type: "string" },
+          thought: { type: "string", maxLength: 400 },
           tool: { type: "null" },
           final: { type: "string" },
         },
@@ -94,16 +95,27 @@ export function extractJsonObject(content: string): string {
   return text.slice(start, end + 1);
 }
 
-export function parseDecision(content: string): AgentDecision {
+/**
+ * Parses JSON, repairing common local-model failures such as a missing closing
+ * brace or an unterminated string caused by an output-token limit.
+ */
+export function parseJsonWithRepair(content: string): unknown {
   const jsonText = extractJsonObject(content);
-
-  let raw: unknown;
   try {
-    raw = JSON.parse(jsonText);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new DecisionParseError(`Response was not valid JSON: ${message}`);
+    return JSON.parse(jsonText);
+  } catch (firstError) {
+    try {
+      return JSON.parse(jsonrepair(jsonText));
+    } catch {
+      const message =
+        firstError instanceof Error ? firstError.message : String(firstError);
+      throw new DecisionParseError(`Response was not valid JSON: ${message}`);
+    }
   }
+}
+
+export function parseDecision(content: string): AgentDecision {
+  const raw = parseJsonWithRepair(content);
 
   const parsed = decisionSchema.safeParse(raw);
   if (!parsed.success) {

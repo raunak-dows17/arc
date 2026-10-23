@@ -6,6 +6,8 @@ import type { SecretStorePort } from "../../domain/ports/secret-store.port.js";
 import { NapiKeyringSecretStore } from "../secrets/napi-keyring.secret-store.js";
 import { pathComparisonKey } from "../../domain/services/portable-path.js";
 import { SECRET_ACCOUNTS } from "../../shared/secret-accounts.js";
+import { resolveProvider } from "../models/model-runtime.js";
+import { listProviderModels } from "../models/model-discovery.js";
 
 export type DoctorStatus = "ok" | "warn" | "fail";
 
@@ -54,14 +56,15 @@ export async function runDoctor(
     detail: `v${nodeVersion}${nodeMajor >= 20 ? "" : " (ARC requires Node 20+)"}`,
   });
 
+  const supportedPlatform =
+    platform === "win32" || platform === "darwin" || platform === "linux";
   checks.push({
     id: "platform",
     label: "Platform",
-    status: platform === "win32" ? "ok" : "warn",
-    detail:
-      platform === "win32"
-        ? "Windows 11 production runtime"
-        : `${platform} (development mode; production target is Windows 11)`,
+    status: supportedPlatform ? "ok" : "warn",
+    detail: supportedPlatform
+      ? `${platform}/${process.arch} is a supported runtime.`
+      : `${platform} is not a tested runtime; Windows, macOS, and Linux are supported.`,
   });
 
   const homeInsideWorkspace =
@@ -102,8 +105,7 @@ export async function runDoctor(
   checks.push(await emailCheck(config, secretStore));
   checks.push(await telegramCheck(config, secretStore));
 
-  checks.push(await ollamaCheck(config, fetchImpl));
-  checks.push(await modelCheck(config, fetchImpl));
+  checks.push(...(await providerChecks(config, secretStore, fetchImpl)));
 
   const totalMemory = options.totalMemory ?? os.totalmem();
   const freeMemory = options.freeMemory ?? os.freemem();
@@ -269,12 +271,55 @@ async function telegramCheck(
   }
 }
 
-async function ollamaCheck(
+async function providerChecks(
   config: AppConfig,
+  secretStore: SecretStorePort,
+  fetchImpl: typeof fetch,
+): Promise<DoctorCheck[]> {
+  const checks: DoctorCheck[] = [];
+  for (const id of usedProviderIds(config)) {
+    const provider = resolveProvider(id, config);
+    if (provider.kind === "ollama") {
+      checks.push(await ollamaCheck(provider.baseUrl, fetchImpl));
+      checks.push(
+        await ollamaModelCheck(config, provider.baseUrl, fetchImpl, id),
+      );
+      continue;
+    }
+
+    const account =
+      provider.apiKeyAccount || `provider.${provider.id}.api-key`;
+    let apiKey: string | null = null;
+    try {
+      apiKey = await secretStore.get(account);
+    } catch (error) {
+      checks.push({
+        id: "providers",
+        label: `Provider ${id}`,
+        status: "fail",
+        detail: `Could not read ${account}: ${errorMessage(error)}`,
+      });
+      continue;
+    }
+    checks.push({
+      id: "providers",
+      label: `Provider ${id}`,
+      status: apiKey ? "ok" : "fail",
+      detail: apiKey
+        ? `${provider.kind} at ${provider.baseUrl}; key is present.`
+        : `Missing key. Run: arc secrets set ${account}`,
+    });
+    checks.push(await cloudModelCheck(config, provider.id, provider, apiKey));
+  }
+  return checks;
+}
+
+async function ollamaCheck(
+  baseUrl: string,
   fetchImpl: typeof fetch,
 ): Promise<DoctorCheck> {
   try {
-    const response = await fetchImpl(`${config.ollama.baseUrl}/api/tags`, {
+    const response = await fetchImpl(`${baseUrl}/api/tags`, {
       signal: AbortSignal.timeout(5_000),
     });
     if (!response.ok) {
@@ -282,37 +327,39 @@ async function ollamaCheck(
         id: "ollama",
         label: "Ollama",
         status: "fail",
-        detail: `HTTP ${response.status} from ${config.ollama.baseUrl}`,
+        detail: `HTTP ${response.status} from ${baseUrl}`,
       };
     }
     return {
       id: "ollama",
       label: "Ollama",
       status: "ok",
-      detail: `Reachable at ${config.ollama.baseUrl}`,
+      detail: `Reachable at ${baseUrl}`,
     };
   } catch (error) {
     return {
       id: "ollama",
       label: "Ollama",
       status: "fail",
-      detail: `Cannot reach ${config.ollama.baseUrl}: ${errorMessage(error)}`,
+      detail: `Cannot reach ${baseUrl}: ${errorMessage(error)}`,
     };
   }
 }
 
-async function modelCheck(
+async function ollamaModelCheck(
   config: AppConfig,
+  baseUrl: string,
   fetchImpl: typeof fetch,
+  providerId: string,
 ): Promise<DoctorCheck> {
   try {
-    const response = await fetchImpl(`${config.ollama.baseUrl}/api/tags`, {
+    const response = await fetchImpl(`${baseUrl}/api/tags`, {
       signal: AbortSignal.timeout(5_000),
     });
     if (!response.ok) {
       return {
         id: "models",
-        label: "Models",
+        label: `Models (${providerId})`,
         status: "fail",
         detail: "Could not list installed Ollama models.",
       };
@@ -325,16 +372,15 @@ async function modelCheck(
         .map((model) => model.name)
         .filter((name): name is string => typeof name === "string"),
     );
-    const required = [
-      config.ollama.model,
-      config.ollama.codingModel,
-      config.ollama.researchModel,
-      config.ollama.decisionModel,
-    ];
-    const missing = required.filter((name) => !hasModel(installed, name));
+    const required = Object.values(config.models.roles)
+      .filter((selection) => selection.provider === providerId)
+      .map((selection) => selection.model);
+    const missing = [...new Set(required)].filter(
+      (name) => !hasModel(installed, name),
+    );
     return {
       id: "models",
-      label: "Models",
+      label: `Models (${providerId})`,
       status: missing.length === 0 ? "ok" : "warn",
       detail:
         missing.length === 0
@@ -344,11 +390,67 @@ async function modelCheck(
   } catch (error) {
     return {
       id: "models",
-      label: "Models",
+      label: `Models (${providerId})`,
       status: "warn",
       detail: `Could not inspect models: ${errorMessage(error)}`,
     };
   }
+}
+
+async function cloudModelCheck(
+  config: AppConfig,
+  providerId: string,
+  provider: ReturnType<typeof resolveProvider>,
+  apiKey: string | null,
+): Promise<DoctorCheck> {
+  const required = Object.values(config.models.roles)
+    .filter((selection) => selection.provider === providerId)
+    .map((selection) => selection.model);
+  const labels = [...new Set(required)].join(", ");
+  if (!apiKey) {
+    return {
+      id: "models",
+      label: `Models (${providerId})`,
+      status: "warn",
+      detail: `Cannot verify ${labels} without an API key.`,
+    };
+  }
+  try {
+    const models = await listProviderModels(
+      provider,
+      apiKey,
+      AbortSignal.timeout(10_000),
+    );
+    const ids = new Set(models.map((model) => model.id));
+    const missing = [...new Set(required)].filter((model) => !ids.has(model));
+    return {
+      id: "models",
+      label: `Models (${providerId})`,
+      status: missing.length === 0 ? "ok" : "warn",
+      detail:
+        missing.length === 0
+          ? `Available: ${[...new Set(required)].join(", ")}`
+          : `Not listed by provider: ${missing.join(", ")}. You can still use a model id manually.`,
+    };
+  } catch (error) {
+    return {
+      id: "models",
+      label: `Models (${providerId})`,
+      status: "warn",
+      detail: `Could not verify provider models: ${errorMessage(error)}`,
+    };
+  }
+}
+
+function usedProviderIds(config: AppConfig): string[] {
+  const ids = new Set<string>();
+  for (const selection of Object.values(config.models.roles)) {
+    ids.add(selection.provider);
+  }
+  for (const selection of config.models.fallback) {
+    ids.add(selection.provider);
+  }
+  return [...ids];
 }
 
 function hasModel(installed: Set<string>, wanted: string): boolean {

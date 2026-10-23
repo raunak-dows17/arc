@@ -20,14 +20,21 @@ import { printDoctorReport, runDoctor } from "./infrastructure/cli/doctor.js";
 import { InteractiveApprovalPrompt } from "./infrastructure/cli/interactive-approval.prompt.js";
 import { runSecretsCommand } from "./infrastructure/cli/secrets.js";
 import { runServeMode } from "./infrastructure/cli/serve.js";
+import {
+  runModelsCommand,
+  runProvidersCommand,
+  runSetupCommand,
+} from "./infrastructure/cli/setup.js";
 import { TerminalRenderer } from "./infrastructure/cli/terminal.renderer.js";
 import { loadConfig } from "./infrastructure/config/env.js";
 import { InMemoryEventBus } from "./infrastructure/events/in-memory-event-bus.js";
 import { JsonlAuditLogger } from "./infrastructure/events/jsonl-audit.logger.js";
-import { OllamaDecisionAdapter } from "./infrastructure/llm/ollama-decision.adapter.js";
-import { OllamaLlmAdapter } from "./infrastructure/llm/ollama.adapter.js";
-import { SerializedLlmAdapter } from "./infrastructure/llm/serialized-llm.adapter.js";
 import { FileMemoryStore } from "./infrastructure/memory/file-memory.store.js";
+import {
+  checkSelectedOllamaModels,
+  createModelRuntime,
+  selectionLabel,
+} from "./infrastructure/models/model-runtime.js";
 import { MarkdownStandingOrders } from "./infrastructure/memory/markdown-standing-orders.js";
 import { JsonSessionStore } from "./infrastructure/persistence/json-session.store.js";
 import { JsonSubAgentRepository } from "./infrastructure/persistence/json-sub-agent.repository.js";
@@ -75,6 +82,33 @@ async function main(): Promise<void> {
   }
 
   await ensureArcHome(config);
+
+  if (process.argv[2] === "setup") {
+    process.exitCode = await runSetupCommand(
+      config,
+      secretStore,
+      process.argv.slice(3),
+    );
+    return;
+  }
+
+  if (process.argv[2] === "models") {
+    process.exitCode = await runModelsCommand(
+      config,
+      secretStore,
+      process.argv.slice(3),
+    );
+    return;
+  }
+
+  if (process.argv[2] === "providers") {
+    process.exitCode = await runProvidersCommand(
+      config,
+      secretStore,
+      process.argv.slice(3),
+    );
+    return;
+  }
 
   const memory = new FileMemoryStore(config.memoryDir);
   await memory.initialize();
@@ -187,37 +221,12 @@ async function main(): Promise<void> {
   registry.register(new RememberTool(memory, events));
   registry.register(new LoadSkillTool(skills));
 
-  const rawLlm = new OllamaLlmAdapter(config.ollama);
-  const health = await rawLlm.checkHealth([
-    config.ollama.model,
-    config.ollama.codingModel,
-    config.ollama.researchModel,
-    config.ollama.decisionModel,
-  ]);
-  for (const warning of health.warnings) {
+  const runtime = await createModelRuntime(config, secretStore);
+  for (const warning of await checkSelectedOllamaModels(config, runtime)) {
     renderer.warn(warning);
   }
-  if (health.missingModels.includes(config.ollama.model)) {
-    renderer.error(
-      `Install "${config.ollama.model}" and start ARC again.`,
-    );
-    process.exitCode = 1;
-    return;
-  }
-
-  const decisionModel = new OllamaDecisionAdapter({
-    baseUrl: config.ollama.decisionBaseUrl,
-    model: config.ollama.decisionModel,
-    keepAlive: config.ollama.keepAlive,
-    timeoutMs: config.ollama.timeoutMs,
-  });
-  const llm = new SerializedLlmAdapter(rawLlm, decisionModel);
-  const modelRouter = new ModelRouter({
-    main: config.ollama.model,
-    research: config.ollama.researchModel,
-    coding: config.ollama.codingModel,
-    decision: config.ollama.decisionModel,
-  });
+  const llm = runtime.llm;
+  const modelRouter = new ModelRouter(config.models.roles);
   const sessionStore = new JsonSessionStore(config.sessionDir);
   const subAgentRuns = new JsonSubAgentRepository(config.runDir);
   const approvals = new ApprovalService(approvalPrompt);
@@ -246,6 +255,7 @@ async function main(): Promise<void> {
   const compacter = new CompactSessionUseCase(llm, {
     thresholdChars: config.agent.compactAtChars,
     keepRecentMessages: config.agent.keepRecentMessages,
+    modelRouter,
   });
 
   const executeTool = new ExecuteToolUseCase(registry, approvals, events);
@@ -309,7 +319,7 @@ async function main(): Promise<void> {
     registry,
     runAgentTurn,
     renderer,
-    modelName: config.ollama.model,
+    modelName: selectionLabel(config.models.roles.main),
     arcHome: config.arcHome,
     defaultProfileId: config.agent.defaultProfileId,
     profiles,

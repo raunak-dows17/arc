@@ -38,9 +38,9 @@ export interface EmailTriageOptions {
 }
 
 /**
- * Tev1 pre-classifier for incoming email. It never generates tool calls and
- * only sees a short, normalized snippet. Any malformed or failed answer is
- * surfaced to the watcher, which can choose a conservative fallback.
+ * Provider-neutral pre-classifier for incoming email. It never generates tool
+ * calls and only sees a short, normalized snippet. Any malformed or failed
+ * answer is surfaced to the watcher, which can choose a conservative fallback.
  */
 export class EmailTriageService implements EmailTriagePort {
   private readonly threshold: number;

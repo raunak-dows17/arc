@@ -1,86 +1,86 @@
 # ARC — Autonomous Regenerative Companion
 
-ARC is a free, local-first companion agent for a Windows 11 laptop. It runs
-entirely on local **Ollama** models, keeps durable Markdown memory, loads
-skills on demand, delegates bounded work to sequential sub-agents, and is
-designed around explicit approval boundaries for anything that leaves the
-machine.
+ARC is a free, provider-neutral companion agent for Windows, macOS, and Linux.
+It can use cloud models from Google Gemini, Groq, OpenRouter, Cerebras,
+Mistral, GitHub Models, or any OpenAI-compatible endpoint, and can optionally
+use local **Ollama** models. It keeps durable Markdown memory, loads skills on
+demand, delegates bounded work to sequential sub-agents, and keeps explicit
+approval boundaries for anything that leaves the machine.
 
-- **Production runtime:** Windows 11, 16 GB RAM, AMD iGPU with 4 GB dedicated
-  memory.
-- **Development runtime:** macOS. Windows-specific path and credential
-  behaviour is tested on macOS from day one.
-- **No cloud LLM calls.** Models are selected from the local Ollama instance.
+- **Runs on Windows, macOS, and Linux.** Paths, credential storage, shell
+  commands, and workspace boundaries are platform-aware.
+- **Cloud-first by default when a provider key exists.** Local Ollama is
+  optional. ARC does not automatically load a large local model on a
+  memory-constrained machine.
 - **Read-only by default for the outside world.** Social analysis and email
-  ingestion will never post, reply, delete, or mark messages read. Email is
+  ingestion never post, reply, delete, or mark messages read. Email is
   read + notify only.
 - **Free-first integrations.** Official APIs and free tiers, cached where
-  possible.
+  possible. Provider limits and model ids change, so setup discovers the
+  current model list.
 
-> **Current milestone: Phase 4 — local tools and web access.** Chat, memory,
-> skills, sub-agents, model routing, Tev1 decision-model support, the
-> fail-closed approval boundary, OS credential storage, Windows-safe paths,
-> `arc doctor`, approval-gated PowerShell, workspace search/edit tools, and
-> Brave web search/fetch are in place. Email, social analysis, Telegram, and the
-> always-on scheduler are the next phases.
+> **Current milestone: Phase 5 + provider layer.** Chat, memory, skills,
+> sub-agents, provider routing, Gemini and OpenAI-compatible adapters, device
+> detection, `arc setup`, read-only Gmail ingestion, Telegram remote chat, the
+> fail-closed approval boundary, OS credential storage, and cross-platform
+> workspace tools are in place.
 
 ## Requirements
 
 - Node.js 20 or newer
-- [Ollama](https://ollama.com) 0.35 or newer for the decision-model endpoint
-- Local models:
+- One of:
+  - an API key for a cloud provider (recommended), or
+  - [Ollama](https://ollama.com) with local models if you explicitly want
+    local inference
+- Optional: a Brave Search API key for `web_search`
+- Optional: a Gmail app password for read-only email notifications
+- Optional: a Telegram bot token for remote chat
 
-```bash
-ollama pull qwen3:8b
-ollama pull qwen2.5-coder:7b
-ollama pull tev1:0.8b
-```
-
-`qwen3:8b` is the recommended maximum generative model for 16 GB RAM.
-`tev1:0.8b` is a small pre-classifier, not a chat model or tool-call
-generator.
+Local models are never required. If you do use Ollama on a 16 GB machine,
+`qwen3:8b` is a reasonable upper bound for generative work, and `tev1:0.8b` is
+a small pre-classifier rather than a chat or tool-call model.
 
 ## Quick start
 
 ```bash
 npm install
 cp .env.example .env
-npm run doctor
-npm start
-```
-
-`npm run doctor` checks Node, private-state separation, Ollama, installed
-models, the OS keyring, Brave Search configuration, memory, and disk without
-running inference.
-
-Once built, the package exposes an `arc` command:
-
-```bash
 npm run build
 npm link          # optional, makes `arc` available on your PATH
+arc setup
 arc doctor
-arc secrets set brave.api-key
 arc
 ```
 
-The Brave key is optional until you use `web_search`. It belongs in the OS
-credential store, never in `.env`.
+`arc setup` detects the device, lists providers, stores the provider key in the
+OS credential store, discovers available models, and writes non-secret routing
+choices to `ARC_HOME/models.json`.
 
-On Windows, run the same commands from PowerShell. The production paths should
-look like this in `.env`:
+Provider keys are never stored in `.env`, source, logs, or `models.json`:
 
-```dotenv
-ARC_HOME=C:\Users\Raunak Pandey\AppData\Local\ARC\agent-home
-ARC_WORKSPACE=C:\Users\Raunak Pandey\Projects\arc-workspace
-ARC_PROFILE=arc
+```bash
+arc secrets set provider.google.api-key
+arc secrets set provider.groq.api-key
+arc secrets set provider.openrouter.api-key
+arc secrets list
 ```
 
-Use a dedicated workspace such as `arc-workspace` until the active-project
-boundary is implemented. Pointing `ARC_WORKSPACE` at all of `Projects` would
-let workspace tools touch every project in that folder; select one project at a
-time for now. `ARC_HOME` must stay outside `ARC_WORKSPACE`. If it does not, ARC
-refuses to start because private memory, sessions, and audit logs would become
-visible to file tools.
+`arc doctor` checks Node, private-state separation, the OS keyring, the
+selected provider and models, Brave Search, email, Telegram, memory, and disk
+without running inference.
+
+Default private state locations:
+
+| Platform | `ARC_HOME` default |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\ARC\agent-home` |
+| macOS | `~/Library/Application Support/ARC/agent-home` |
+| Linux | `$XDG_STATE_HOME/arc/agent-home` or `~/.local/state/arc/agent-home` |
+
+`ARC_WORKSPACE` defaults to `./sandbox` in the current project. `arc setup`
+shows the resolved path, and you can override it with `ARC_WORKSPACE`. Keep
+`ARC_HOME` outside `ARC_WORKSPACE`; ARC refuses to start otherwise because
+private memory, sessions, and audit logs would become visible to file tools.
 
 ## Commands
 
@@ -113,14 +113,23 @@ Process commands:
 | Command | Purpose |
 | --- | --- |
 | `arc` | Start the interactive terminal REPL |
+| `arc setup` | Detect the device, add a provider key, and choose models |
+| `arc models` | Show provider/model routing and key status |
+| `arc models set <role> <provider>/<model>` | Change one routing role |
+| `arc models fallback <provider>/<model> [...]` | Set a fallback chain |
+| `arc providers` | List provider presets and key status |
+| `arc providers add <id> <https-base-url>` | Add a custom OpenAI-compatible provider |
+| `arc providers remove <id>` | Remove an unused custom provider |
 | `arc serve` | Run Telegram chat and/or the read-only Gmail watcher |
-| `arc doctor` | Check paths, keyring, Ollama, models, email, and Telegram |
+| `arc doctor` | Check paths, keyring, selected providers/models, email, and Telegram |
 | `arc secrets ...` | Manage OS-keyring entries |
 
 Secrets are managed outside the REPL:
 
 ```bash
 arc secrets list
+arc secrets set provider.google.api-key
+arc secrets set provider.groq.api-key
 arc secrets set brave.api-key
 arc secrets set gmail.app-password
 arc secrets set telegram.bot-token
@@ -133,32 +142,42 @@ arguments, so they do not land in shell history.
 
 ## Models and routing
 
-| Role | Default | Notes |
-| --- | --- | --- |
-| Main / research | `qwen3:8b` | General reasoning, writing, memory, tool calls |
-| Coding | `qwen2.5-coder:7b` | Coding profiles and coding tasks |
-| Decision pre-classifier | `tev1:0.8b` | Ollama `/v1/systemone`; yes/no, choice, score |
-| Compaction | main model | Summarizes old transcript history |
+`arc setup` writes `ARC_HOME/models.json` with a provider/model pair for each
+role:
 
-The model router selects a model by task/profile. `SerializedLlmAdapter`
-guarantees that only one generative or decision-model request runs at a time,
-including parent turns, sub-agents, and future email watchers. This matters on
-a 16 GB machine.
+| Role | Purpose |
+| --- | --- |
+| `main` | General reasoning, writing, memory, and tool calls |
+| `research` | Research profiles |
+| `coding` | Coding profiles and coding tasks |
+| `triage` | Cheap/fast email and notification classification |
+| `compaction` | Summarizes old transcript history |
 
-Tev1 is deliberately **not** used to generate tool calls. It answers named
-questions about a state, for example “does this email need attention?” or “is
-this a billing, scheduling, or personal message?” Uncertain decisions should be
-escalated to the main model.
+Provider presets include Google Gemini, Groq, OpenRouter, Cerebras, Mistral,
+GitHub Models, and optional Ollama. Any other OpenAI-compatible endpoint can be
+added with a base URL and key account. The setup wizard queries each provider’s
+model list, so it is not tied to a hardcoded catalog.
 
-Recommended Ollama service limits:
+Fallbacks are optional but recommended:
+
+```bash
+arc models fallback groq/llama-3.3-70b-versatile openrouter/meta-llama/llama-3.3-70b-instruct:free
+```
+
+`SerializedLlmAdapter` still funnels model calls through one promise chain. This
+avoids free-tier bursts and keeps local inference from stacking requests on a
+small machine.
+
+For Ollama, keep the service serialized:
 
 ```text
 OLLAMA_MAX_LOADED_MODELS=1
 OLLAMA_NUM_PARALLEL=1
 ```
 
-If `qwen2.5-coder:7b` spills to shared memory, lower `ARC_NUM_CTX` from 8192 to
-4096 first.
+Tev1 remains supported as a local triage model through Ollama’s
+`/v1/systemone` endpoint. Cloud triage uses a provider-neutral JSON classifier
+and only sees sender, subject, timestamp, and a short snippet.
 
 ## Web and coding tools
 
@@ -186,17 +205,20 @@ is instructed not to follow instructions found inside pages.
 
 ### Read-only Gmail notifications
 
-ARC can poll an unread Gmail mailbox and send a short notification when Tev1
-thinks a message deserves attention. It is deliberately one-way:
+ARC can poll an unread Gmail mailbox and send a short notification when the
+selected triage model thinks a message deserves attention. The triage role can
+be local Tev1 or a cheap cloud model. It is deliberately one-way:
 
 - The mailbox is opened with IMAP `EXAMINE`/read-only mode.
 - Message bodies are fetched with `BODY.PEEK`, so ARC never sets `\Seen`.
 - There is no send, reply, delete, move, archive, or flag-changing code path.
 - Deduplication uses mailbox `UIDVALIDITY` plus the last processed UID, because
   unread mail keeps appearing on every poll.
-- Tev1 sees only sender, subject, timestamp, and a short snippet. If Tev1 is
-  unavailable, ARC falls back to notifying so important mail is not silently
-  missed; the message is labelled `triage unavailable`.
+- The triage model sees only sender, subject, timestamp, and a short snippet.
+  If triage is unavailable, ARC falls back to notifying so important mail is
+  not silently missed; the message is labelled `triage unavailable`.
+- Cloud triage is opt-in through the `triage` role. Choose local Tev1 if you do
+  not want email metadata sent to a provider.
 
 Setup:
 
@@ -235,13 +257,12 @@ notifications, and short email snippets, never full mail bodies or secrets.
 
 | Path | Default | Purpose |
 | --- | --- | --- |
-| `ARC_HOME` | `./.arc` on macOS; `%LOCALAPPDATA%\ARC\agent-home` on Windows | Private memory, skills, profiles, sessions, run records, audit log |
-| `ARC_WORKSPACE` | `./sandbox` | The only filesystem world exposed to file tools |
+| `ARC_HOME` | Per-user OS state directory (see Quick start) | Private memory, skills, profiles, sessions, run records, audit log, `models.json` |
+| `ARC_WORKSPACE` | `./sandbox` in the current project | The only filesystem world exposed to file tools |
 
-A tighter production layout is a dedicated `arc-workspace` folder as the
-workspace and `%LOCALAPPDATA%\ARC\agent-home` as private state. Workspace writes
-are auto-allowed inside that boundary; sensitive paths are blocked. Use one
-project at a time until the active-project selector is implemented.
+Use one project at a time. Workspace writes are auto-allowed inside that
+boundary; sensitive paths are blocked. `ARC_HOME` must stay outside
+`ARC_WORKSPACE`.
 
 Legacy names are still accepted during migration: `AGENT_HOME`,
 `AGENT_PROFILE`, `WORKSPACE_DIR`, `SANDBOX_DIR`, and `OLLAMA_*` variables.
@@ -269,49 +290,54 @@ ARC assumes the model can make mistakes or be manipulated by content it reads.
   credentials, non-default ports, private/loopback/link-local/metadata
   addresses, and DNS names that resolve into them. Redirects are re-checked.
   Fetched content is labelled untrusted and never treated as instructions.
-- **Secrets:** use the Windows Credential Manager through the keyring adapter;
-  never put tokens in `.env`, memory, prompts, or audit logs. `arc secrets set`
-  reads from a hidden prompt. `arc doctor` performs a keyring probe and reports
-  whether the Brave key is present.
+- **Secrets:** use the OS credential store (Windows Credential Manager, macOS
+  Keychain, or Linux Secret Service) through the keyring adapter; never put
+  tokens in `.env`, memory, prompts, or audit logs. `arc secrets set` reads from
+  a hidden prompt. `arc doctor` performs a keyring probe and reports which
+  provider keys are present.
 - **Audit:** events are written as JSONL under `ARC_HOME/audit.jsonl` with
   sensitive keys redacted, including approval requests and decisions.
 - **Telegram:** bot chat is not end-to-end encrypted. Send summaries and
   notifications, not full email bodies or secrets.
 
-## Windows 11 always-on setup
+## Always-on setup
 
-ARC is designed to run at user logon, non-admin, under the same Windows account
-that owns the Credential Manager entries.
+ARC is designed to run non-admin under the same user account that owns the OS
+keyring entries. Install Node 20+, clone or install the package, create `.env`
+from `.env.example`, and run:
 
-1. Install Node 20+ and Ollama.
-2. Put the source at `C:\Users\Raunak Pandey\Projects\arc`.
-3. Create `.env` with the production `ARC_HOME` and `ARC_WORKSPACE` above.
-4. Run `npm install`, `npm run build`, and `npm run doctor`.
-5. If you want web search, run `npm link` and then
-   `arc secrets set brave.api-key`.
-6. For email or Telegram, store the credentials in the same Windows account's
-   Credential Manager:
+```bash
+npm install
+npm run build
+arc setup
+arc doctor
+```
 
-   ```powershell
-   arc secrets set gmail.app-password
-   arc secrets set telegram.bot-token
-   arc doctor
-   ```
+For email or Telegram:
 
-7. Create a Task Scheduler task triggered **At log on**, with
-   `node C:\Users\Raunak Pandey\Projects\arc\out\main.js serve` as the action
-   and the project folder as the start-in directory. Use plain
-   `node ...\out\main.js` only if you want the interactive REPL at logon.
-8. Keep the user session logged in and locked.
-9. Disable sleep and hibernation while on AC power.
-10. Verify `arc doctor` and `arc serve` after a reboot. `arc serve` starts only
-    the channels enabled in `.env`; it refuses to start when both email and
-    Telegram are disabled.
+```bash
+arc secrets set gmail.app-password
+arc secrets set telegram.bot-token
+arc doctor
+```
 
-A per-user logon task is preferred over running as `SYSTEM`: `SYSTEM` may not
-be able to read the user's Credential Manager entries. Sleep, reboot, or logoff
-will interrupt Telegram and email watchers; ARC is always-on only while the
-Windows session is available.
+`arc serve` starts only the channels enabled in `.env`; it refuses to start
+when both email and Telegram are disabled.
+
+Platform-specific supervision:
+
+- **Windows:** create a Task Scheduler task triggered **At log on**, with
+  `node <path-to-arc>\out\main.js serve` as the action and the project folder as
+  the start-in directory. Use a per-user task, not `SYSTEM`, so the task can
+  read the user's Credential Manager entries.
+- **macOS:** create a LaunchAgent in `~/Library/LaunchAgents` that runs
+  `node <path-to-arc>/out/main.js serve` at login.
+- **Linux:** create a user `systemd` service (`systemctl --user`) that runs
+  `node <path-to-arc>/out/main.js serve`.
+
+Keep the user session logged in, disable sleep while on AC power, and verify
+`arc doctor` and `arc serve` after a reboot. Sleep, reboot, or logoff interrupts
+the watchers; ARC is always-on only while the user session is available.
 
 ## Configuration
 
@@ -319,15 +345,16 @@ Copy `.env.example` to `.env`. Canonical variables include:
 
 | Variable | Default |
 | --- | --- |
-| `ARC_HOME` | `./.arc` (macOS) / `%LOCALAPPDATA%\ARC\agent-home` (Windows) |
+| `ARC_HOME` | Per-user OS state directory |
 | `ARC_WORKSPACE` | `./sandbox` |
 | `ARC_PROFILE` | `arc` |
-| `ARC_MODEL` | `qwen3:8b` |
-| `ARC_CODING_MODEL` | `qwen2.5-coder:7b` |
-| `ARC_RESEARCH_MODEL` | `qwen3:8b` |
-| `ARC_DECISION_MODEL` | `tev1:0.8b` |
-| `ARC_NUM_CTX` | `8192` |
-| `ARC_KEEP_ALIVE` | `10m` |
+| `ARC_MODEL_PROVIDER` | Provider id; overrides `models.json` for legacy/CI runs |
+| `ARC_MODEL` | Main model id (legacy/Ollama when no `models.json`) |
+| `ARC_CODING_MODEL` | Coding model id (legacy/Ollama when no `models.json`) |
+| `ARC_RESEARCH_MODEL` | Research model id |
+| `ARC_DECISION_MODEL` | Triage model id |
+| `ARC_NUM_CTX` | `8192` (Ollama only) |
+| `ARC_KEEP_ALIVE` | `10m` (Ollama only) |
 | `ARC_MAX_AGENT_STEPS` | `12` |
 | `ARC_MAX_SUBAGENTS_PER_TURN` | `2` |
 | `ARC_WEB_SEARCH_TIMEOUT_MS` | `15000` |
@@ -385,8 +412,9 @@ npm run build
 The test suite covers the agent loop, context assembly, compaction, sub-agent
 isolation, profile policy, approval fail-closed behaviour and session grants,
 Brave search, SSRF-safe fetch, workspace search/edit tools, shell timeouts and
-cancellation, Tev1 response parsing, model routing, OS-keyring injection,
-Windows path hardening, sandbox containment, memory, sessions, skills,
+cancellation, Tev1 and cloud decision parsing, provider routing and fallback,
+JSON repair, device classification, model config, OS-keyring injection,
+cross-platform path hardening, sandbox containment, memory, sessions, skills,
 events/redaction, secrets CLI, read-only Gmail source and UIDVALIDITY dedupe,
 email triage and watcher fallback, Telegram API/approval/chat routing, and
 `arc doctor`.
@@ -397,7 +425,7 @@ email triage and watcher fallback, Telegram API/approval/chat routing, and
 src/
   domain/           entities, value objects, ports, path/security rules
   application/      use cases, context assembly, routing, approvals
-  infrastructure/   Ollama, event bus, persistence, CLI, keyring, tools
+  infrastructure/   provider adapters, event bus, persistence, CLI, keyring, tools
   shared/           small utilities
 skills/             built-in Markdown skills
 ```
@@ -407,23 +435,30 @@ skills/             built-in Markdown skills
 - **Phase 4 (complete):** Brave web search/fetch, SSRF protection, workspace
   search/edit tools, approval-gated PowerShell, interactive CLI approvals, and
   the secrets CLI.
-- **Phase 5 (complete):** read-only Gmail IMAP ingestion, Tev1 notification
-  triage, Telegram remote chat and notifications.
+- **Phase 5 (complete):** read-only Gmail IMAP ingestion, notification triage,
+  Telegram remote chat and notifications.
+- **Provider layer (complete):** Gemini and OpenAI-compatible providers,
+  optional Ollama, device detection, `arc setup`/`arc models`, fallback chains,
+  JSON repair, and cross-platform state paths.
 - **Phase 6:** read-only YouTube and Instagram performance analysis, content
   suggestions.
-- **Phase 7:** always-on Windows hardening, installer or standalone build,
-  npm distribution.
+- **Phase 7:** always-on hardening, installer or standalone build, npm
+  distribution.
 
 ## Troubleshooting
 
-- **“Model … is not installed”** — run the `ollama pull` command shown by
-  `arc doctor`.
+- **“Provider … needs an API key”** — run `arc secrets set
+  provider.<id>.api-key`, then `arc doctor`.
+- **“Model … is not installed”** — this only applies to a selected Ollama
+  model. Run the `ollama pull` command shown by `arc doctor`, or choose a cloud
+  provider with `arc setup`.
 - **Ollama is unreachable** — start `ollama serve` and confirm
-  `ARC_OLLAMA_BASE_URL`.
+  `ARC_OLLAMA_BASE_URL`, or switch to a cloud provider.
 - **ARC_HOME must be outside ARC_WORKSPACE** — move private state out of the
   workspace; this is intentional.
-- **Keyring probe fails** — make sure ARC is running as the same logged-in
-  user that owns the Windows Credential Manager entries.
+- **Keyring probe fails** — make sure ARC is running as the same logged-in user
+  that owns the OS keyring entries. On Linux, install a Secret Service provider
+  such as GNOME Keyring or KWallet.
 - **`web_search` says it is not configured** — run
   `arc secrets set brave.api-key`. The key must be from the Brave Search API,
   not a general Brave browser key.
