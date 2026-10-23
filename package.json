@@ -1,0 +1,38 @@
+{
+  "name": "local-autonomous-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first autonomous agent CLI powered by Ollama and qwen3:8b",
+  "type": "module",
+  "main": "out/main.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc",
+    "start:prod": "node out/main.js",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/application/context-builder.test.ts src/application/run-agent-turn.usecase.test.ts src/infrastructure/sandbox/node-fs-sandbox.adapter.test.ts src/infrastructure/tools/file-tools.test.ts src/infrastructure/persistence/json-session.store.test.ts src/infrastructure/llm/decision.schema.test.ts",
+    "ollama:check": "curl -s http://127.0.0.1:11434/api/tags"
+  },
+  "keywords": [
+    "agent",
+    "ollama",
+    "qwen3",
+    "cli",
+    "clean-architecture"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^18.0.9",
+    "picocolors": "^1.1.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
