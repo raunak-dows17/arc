@@ -13,6 +13,7 @@ function request(): Omit<ApprovalRequest, "id" | "expiresAt"> {
     channel: "cli",
     sessionId: "session-1",
     turnId: "turn-1",
+    mode: "always",
   };
 }
 
@@ -73,5 +74,85 @@ describe("ApprovalService", () => {
 
     assert.equal(decision.approved, false);
     assert.equal(decision.decidedBy, "abort");
+  });
+
+  it("reuses a session grant for the same tool and session", async () => {
+    let asks = 0;
+    const prompt: ApprovalPromptPort = {
+      async ask() {
+        asks += 1;
+        return {
+          approved: true,
+          decidedBy: "user",
+          rememberForSession: true,
+        };
+      },
+    };
+    const service = new ApprovalService(prompt, { ttlMs: 1_000 });
+    const webRequest = {
+      ...request(),
+      toolName: "web_fetch",
+      risk: "network" as const,
+      mode: "session" as const,
+    };
+
+    const first = await service.request(webRequest);
+    const second = await service.request(webRequest);
+    const otherTool = await service.request({
+      ...webRequest,
+      toolName: "web_search",
+    });
+
+    assert.equal(first.decidedBy, "user");
+    assert.equal(second.decidedBy, "session");
+    assert.equal(otherTool.decidedBy, "user");
+    assert.equal(asks, 2);
+  });
+
+  it("never remembers shell approvals even if the prompt asks to", async () => {
+    let asks = 0;
+    const prompt: ApprovalPromptPort = {
+      async ask() {
+        asks += 1;
+        return {
+          approved: true,
+          decidedBy: "user",
+          rememberForSession: true,
+        };
+      },
+    };
+    const service = new ApprovalService(prompt, { ttlMs: 1_000 });
+
+    await service.request(request());
+    await service.request(request());
+
+    assert.equal(asks, 2);
+  });
+
+  it("clears grants for a replaced session", async () => {
+    let asks = 0;
+    const prompt: ApprovalPromptPort = {
+      async ask() {
+        asks += 1;
+        return {
+          approved: true,
+          decidedBy: "user",
+          rememberForSession: true,
+        };
+      },
+    };
+    const service = new ApprovalService(prompt, { ttlMs: 1_000 });
+    const webRequest = {
+      ...request(),
+      toolName: "web_fetch",
+      risk: "network" as const,
+      mode: "session" as const,
+    };
+
+    await service.request(webRequest);
+    service.clearSession("session-1");
+    await service.request(webRequest);
+
+    assert.equal(asks, 2);
   });
 });

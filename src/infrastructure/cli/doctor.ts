@@ -5,6 +5,7 @@ import type { AppConfig } from "../config/env.js";
 import type { SecretStorePort } from "../../domain/ports/secret-store.port.js";
 import { NapiKeyringSecretStore } from "../secrets/napi-keyring.secret-store.js";
 import { pathComparisonKey } from "../../domain/services/portable-path.js";
+import { SECRET_ACCOUNTS } from "../../shared/secret-accounts.js";
 
 export type DoctorStatus = "ok" | "warn" | "fail";
 
@@ -97,6 +98,7 @@ export async function runDoctor(
     status: keyring.ok ? "ok" : "fail",
     detail: keyring.message,
   });
+  checks.push(await braveCheck(secretStore));
 
   checks.push(await ollamaCheck(config, fetchImpl));
   checks.push(await modelCheck(config, fetchImpl));
@@ -170,6 +172,29 @@ async function pathCheck(
       label,
       status: "fail",
       detail: `${directory} is not available: ${errorMessage(error)}`,
+    };
+  }
+}
+
+async function braveCheck(
+  secretStore: SecretStorePort,
+): Promise<DoctorCheck> {
+  try {
+    const key = await secretStore.get(SECRET_ACCOUNTS.braveApiKey);
+    return {
+      id: "brave",
+      label: "Brave Search",
+      status: key ? "ok" : "warn",
+      detail: key
+        ? "API key is present in the OS credential store."
+        : "No API key. Set one with: arc secrets set brave.api-key",
+    };
+  } catch (error) {
+    return {
+      id: "brave",
+      label: "Brave Search",
+      status: "warn",
+      detail: `Could not read the Brave API key: ${errorMessage(error)}`,
     };
   }
 }

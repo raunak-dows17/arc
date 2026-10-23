@@ -84,4 +84,30 @@ describe("loadConfig", () => {
       /ARC_HOME must be outside ARC_WORKSPACE/,
     );
   });
+
+  it("configures bounded web and shell tools", () => {
+    const defaults = loadConfig({
+      ARC_HOME: "./.arc",
+      ARC_WORKSPACE: "./workspace",
+    } as NodeJS.ProcessEnv);
+    assert.equal(defaults.web.maxResults, 8);
+    assert.equal(defaults.web.maxChars, 20_000);
+    assert.equal(defaults.shell.timeoutMs, 60_000);
+
+    const configured = loadConfig({
+      ARC_HOME: "./.arc",
+      ARC_WORKSPACE: "./workspace",
+      ARC_WEB_SEARCH_URL: "https://search.example.test/v1",
+      ARC_WEB_FETCH_TIMEOUT_MS: "5000",
+      ARC_WEB_MAX_RESULTS: "3",
+      ARC_SHELL_TIMEOUT_MS: "15000",
+      ARC_SHELL_MAX_OUTPUT_BYTES: "8000",
+    } as NodeJS.ProcessEnv);
+
+    assert.equal(configured.web.searchUrl, "https://search.example.test/v1");
+    assert.equal(configured.web.fetchTimeoutMs, 5_000);
+    assert.equal(configured.web.maxResults, 3);
+    assert.equal(configured.shell.timeoutMs, 15_000);
+    assert.equal(configured.shell.maxOutputBytes, 8_000);
+  });
 });

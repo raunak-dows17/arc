@@ -2,6 +2,13 @@ export type ApprovalChannel = "cli" | "telegram" | "scheduler";
 
 export type ApprovalRisk = "read" | "workspace-write" | "network" | "shell";
 
+/**
+ * "always" asks for every invocation. "session" may be granted once for the
+ * rest of the current session; it is intended for repeated read-only network
+ * access, never for shell commands.
+ */
+export type ApprovalMode = "always" | "session";
+
 export interface ApprovalRequest {
   id: string;
   toolName: string;
@@ -11,6 +18,7 @@ export interface ApprovalRequest {
   channel: ApprovalChannel;
   sessionId: string;
   turnId?: string;
+  mode: ApprovalMode;
   /** Unix epoch milliseconds. */
   expiresAt: number;
 }
@@ -19,6 +27,8 @@ export interface ApprovalDecision {
   approved: boolean;
   decidedBy: string;
   reason?: string;
+  /** Only honoured by the approval service for tools in "session" mode. */
+  rememberForSession?: boolean;
 }
 
 /**

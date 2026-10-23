@@ -5,6 +5,7 @@ import type {
 } from "../../domain/entities/agent-session.js";
 import { AgentTurnError } from "../../domain/errors/agent.errors.js";
 import type { EventBusPort } from "../../domain/events/agent-event.js";
+import type { ApprovalChannel } from "../../domain/ports/approval.port.js";
 import type { LLMPort } from "../../domain/ports/llm.port.js";
 import type { ToolCall } from "../../domain/value-objects/tool-call.js";
 import { truncateText } from "../../shared/text.js";
@@ -32,6 +33,7 @@ export interface RunAgentTurnInput {
   profile: AgentProfile;
   prompt: string;
   signal?: AbortSignal;
+  channel?: ApprovalChannel;
   callbacks?: AgentTurnCallbacks;
 }
 
@@ -163,6 +165,8 @@ export class RunAgentTurnUseCase {
               agentId: profile.id,
               depth: session.depth,
               allowedSkills: profile.skills,
+              ...(input.channel ? { channel: input.channel } : {}),
+              turnId: `${session.id}:step-${step + 1}`,
               ...(input.signal ? { signal: input.signal } : {}),
             },
             profile,

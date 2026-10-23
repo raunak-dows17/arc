@@ -17,11 +17,12 @@ machine.
 - **Free-first integrations.** Official APIs and free tiers, cached where
   possible.
 
-> **Current milestone: Phase 3 — ARC foundation.** Chat, memory, skills,
-> sub-agents, model routing, Tev1 decision-model support, the approval
-> boundary, OS credential storage, Windows-safe paths, and `arc doctor` are in
-> place. Web search, coding tools, PowerShell, email, social analysis,
-> Telegram, and the always-on scheduler are the next phases.
+> **Current milestone: Phase 4 — local tools and web access.** Chat, memory,
+> skills, sub-agents, model routing, Tev1 decision-model support, the
+> fail-closed approval boundary, OS credential storage, Windows-safe paths,
+> `arc doctor`, approval-gated PowerShell, workspace search/edit tools, and
+> Brave web search/fetch are in place. Email, social analysis, Telegram, and the
+> always-on scheduler are the next phases.
 
 ## Requirements
 
@@ -49,7 +50,8 @@ npm start
 ```
 
 `npm run doctor` checks Node, private-state separation, Ollama, installed
-models, the OS keyring, memory, and disk without running inference.
+models, the OS keyring, Brave Search configuration, memory, and disk without
+running inference.
 
 Once built, the package exposes an `arc` command:
 
@@ -57,21 +59,28 @@ Once built, the package exposes an `arc` command:
 npm run build
 npm link          # optional, makes `arc` available on your PATH
 arc doctor
+arc secrets set brave.api-key
 arc
 ```
+
+The Brave key is optional until you use `web_search`. It belongs in the OS
+credential store, never in `.env`.
 
 On Windows, run the same commands from PowerShell. The production paths should
 look like this in `.env`:
 
 ```dotenv
 ARC_HOME=C:\Users\Raunak Pandey\AppData\Local\ARC\agent-home
-ARC_WORKSPACE=C:\Users\Raunak Pandey\Projects
+ARC_WORKSPACE=C:\Users\Raunak Pandey\Projects\arc-workspace
 ARC_PROFILE=arc
 ```
 
-`ARC_HOME` must stay outside `ARC_WORKSPACE`. If it does not, ARC refuses to
-start because private memory, sessions, and audit logs would become visible to
-file tools.
+Use a dedicated workspace such as `arc-workspace` until the active-project
+boundary is implemented. Pointing `ARC_WORKSPACE` at all of `Projects` would
+let workspace tools touch every project in that folder; select one project at a
+time for now. `ARC_HOME` must stay outside `ARC_WORKSPACE`. If it does not, ARC
+refuses to start because private memory, sessions, and audit logs would become
+visible to file tools.
 
 ## Commands
 
@@ -98,6 +107,18 @@ Inside the REPL:
 | `/model` | Show the configured main model |
 
 Anything else is sent to ARC as a task.
+
+Secrets are managed outside the REPL:
+
+```bash
+arc secrets list
+arc secrets set brave.api-key
+arc secrets check brave.api-key
+arc secrets delete brave.api-key
+```
+
+`set` uses a hidden prompt. Secrets are never accepted as command-line
+arguments, so they do not land in shell history.
 
 ## Models and routing
 
@@ -128,6 +149,28 @@ OLLAMA_NUM_PARALLEL=1
 If `qwen2.5-coder:7b` spills to shared memory, lower `ARC_NUM_CTX` from 8192 to
 4096 first.
 
+## Web and coding tools
+
+- **`web_search`** uses the Brave Search API free tier. The first network call
+  in a session asks for approval; choosing “session” reuses that grant for the
+  rest of the session. Results are cached in memory for five minutes.
+- **`web_fetch`** retrieves a public page as bounded text. Loopback, private,
+  link-local, metadata, and reserved addresses are blocked, and every redirect
+  is re-checked. Responses are capped at 512 KB and 20,000 readable characters
+  by default.
+- **`search_files`** finds literal text across the workspace while skipping
+  dependency, build, and binary content.
+- **`replace_in_file`** performs exact-string edits and requires a unique match
+  unless `replace_all` is explicit. `write_file` remains available for complete
+  rewrites.
+- **`shell`** uses PowerShell on Windows and the login shell on macOS/Linux.
+  Every command asks for approval, even after a network session grant. Shell
+  commands run with the user's privileges and can reach outside the workspace.
+
+The built-in `coder` profile combines the coding and web tools with
+approval-gated shell access. Web content is always marked untrusted; the model
+is instructed not to follow instructions found inside pages.
+
 ## Two separate directories
 
 | Path | Default | Purpose |
@@ -135,10 +178,10 @@ If `qwen2.5-coder:7b` spills to shared memory, lower `ARC_NUM_CTX` from 8192 to
 | `ARC_HOME` | `./.arc` on macOS; `%LOCALAPPDATA%\ARC\agent-home` on Windows | Private memory, skills, profiles, sessions, run records, audit log |
 | `ARC_WORKSPACE` | `./sandbox` | The only filesystem world exposed to file tools |
 
-A tighter production layout is the user's Projects folder as the workspace
-and `%LOCALAPPDATA%\ARC\agent-home` as private state. Workspace writes are
-intended to be auto-allowed inside the active-project boundary; anything
-outside it, or any sensitive path, is blocked.
+A tighter production layout is a dedicated `arc-workspace` folder as the
+workspace and `%LOCALAPPDATA%\ARC\agent-home` as private state. Workspace writes
+are auto-allowed inside that boundary; sensitive paths are blocked. Use one
+project at a time until the active-project selector is implemented.
 
 Legacy names are still accepted during migration: `AGENT_HOME`,
 `AGENT_PROFILE`, `WORKSPACE_DIR`, `SANDBOX_DIR`, and `OLLAMA_*` variables.
@@ -158,14 +201,20 @@ ARC assumes the model can make mistakes or be manipulated by content it reads.
   inside the workspace. `.agent` and `.arc` directories inside the workspace
   are reserved and hidden.
 - **Approval boundary:** tools marked `requiresApproval` fail closed unless a
-  human approves. Timeouts and cancellation become denials. The interactive
-  CLI and Telegram approval prompts are wired in the next phase; shell is not
-  available until then.
+  human approves. Timeouts, cancellation, a closed terminal, and a missing
+  human channel all become denials. Network tools can be granted once per
+  session; shell commands always require a fresh approval. Approval requests
+  and decisions are written to the audit log.
+- **Web safety:** `web_fetch` rejects non-HTTP(S) schemes, embedded
+  credentials, non-default ports, private/loopback/link-local/metadata
+  addresses, and DNS names that resolve into them. Redirects are re-checked.
+  Fetched content is labelled untrusted and never treated as instructions.
 - **Secrets:** use the Windows Credential Manager through the keyring adapter;
-  never put tokens in `.env`, memory, prompts, or audit logs. `arc doctor`
-  performs a set/read/delete probe.
+  never put tokens in `.env`, memory, prompts, or audit logs. `arc secrets set`
+  reads from a hidden prompt. `arc doctor` performs a keyring probe and reports
+  whether the Brave key is present.
 - **Audit:** events are written as JSONL under `ARC_HOME/audit.jsonl` with
-  sensitive keys redacted.
+  sensitive keys redacted, including approval requests and decisions.
 - **Telegram:** bot chat is not end-to-end encrypted. Send summaries and
   notifications, not full email bodies or secrets.
 
@@ -178,12 +227,14 @@ that owns the Credential Manager entries.
 2. Put the source at `C:\Users\Raunak Pandey\Projects\arc`.
 3. Create `.env` with the production `ARC_HOME` and `ARC_WORKSPACE` above.
 4. Run `npm install`, `npm run build`, and `npm run doctor`.
-5. Create a Task Scheduler task triggered **At log on**, with
+5. If you want web search, run `npm link` and then
+   `arc secrets set brave.api-key`.
+6. Create a Task Scheduler task triggered **At log on**, with
    `node C:\Users\Raunak Pandey\Projects\arc\out\main.js` as the action and the
    project folder as the start-in directory.
-6. Keep the user session logged in and locked.
-7. Disable sleep and hibernation while on AC power.
-8. Verify `arc doctor` after a reboot.
+7. Keep the user session logged in and locked.
+8. Disable sleep and hibernation while on AC power.
+9. Verify `arc doctor` after a reboot.
 
 A per-user logon task is preferred over running as `SYSTEM`: `SYSTEM` may not
 be able to read the user's Credential Manager entries. Sleep, reboot, or logoff
@@ -207,11 +258,23 @@ Copy `.env.example` to `.env`. Canonical variables include:
 | `ARC_KEEP_ALIVE` | `10m` |
 | `ARC_MAX_AGENT_STEPS` | `12` |
 | `ARC_MAX_SUBAGENTS_PER_TURN` | `2` |
+| `ARC_WEB_SEARCH_TIMEOUT_MS` | `15000` |
+| `ARC_WEB_FETCH_TIMEOUT_MS` | `20000` |
+| `ARC_WEB_MAX_BYTES` | `524288` |
+| `ARC_WEB_MAX_CHARS` | `20000` |
+| `ARC_WEB_MAX_RESULTS` | `8` |
+| `ARC_WEB_CACHE_TTL_MS` | `300000` |
+| `ARC_SHELL_TIMEOUT_MS` | `60000` |
+| `ARC_SHELL_MAX_OUTPUT_BYTES` | `65536` |
+
+Network tool approvals may be granted for the current session. Shell commands
+never inherit a session grant.
 
 ## Skills and profiles
 
-Built-in profiles: `arc` (default, all tools), `researcher` (read-only),
-`reviewer` (read-only), and `writer` (workspace writes only). Add or override
+Built-in profiles: `arc` (default, all tools), `researcher` (read-only, with
+web research), `reviewer` (read-only), `writer` (workspace writes only), and
+`coder` (workspace coding, web, and approval-gated shell). Add or override
 profiles with Markdown frontmatter in `ARC_HOME/agents/<id>.md`.
 
 Skills are loaded from, in order:
@@ -232,9 +295,11 @@ npm run build
 ```
 
 The test suite covers the agent loop, context assembly, compaction, sub-agent
-isolation, profile policy, approval fail-closed behaviour, Tev1 response
-parsing, model routing, OS-keyring injection, Windows path hardening, sandbox
-containment, memory, sessions, skills, events/redaction, and `arc doctor`.
+isolation, profile policy, approval fail-closed behaviour and session grants,
+Brave search, SSRF-safe fetch, workspace search/edit tools, shell timeouts and
+cancellation, Tev1 response parsing, model routing, OS-keyring injection,
+Windows path hardening, sandbox containment, memory, sessions, skills,
+events/redaction, secrets CLI, and `arc doctor`.
 
 ## Project layout
 
@@ -249,8 +314,9 @@ skills/             built-in Markdown skills
 
 ## Roadmap
 
-- **Phase 4:** web search/fetch (Brave free tier), coding tools, approval-gated
-  PowerShell, interactive CLI approval prompt.
+- **Phase 4 (complete):** Brave web search/fetch, SSRF protection, workspace
+  search/edit tools, approval-gated PowerShell, interactive CLI approvals, and
+  the secrets CLI.
 - **Phase 5:** read-only Gmail IMAP ingestion, Tev1 notification triage,
   Telegram remote chat and notifications.
 - **Phase 6:** read-only YouTube and Instagram performance analysis, content
@@ -268,6 +334,13 @@ skills/             built-in Markdown skills
   workspace; this is intentional.
 - **Keyring probe fails** — make sure ARC is running as the same logged-in
   user that owns the Windows Credential Manager entries.
+- **`web_search` says it is not configured** — run
+  `arc secrets set brave.api-key`. The key must be from the Brave Search API,
+  not a general Brave browser key.
+- **`web_fetch` says an address is blocked** — ARC refuses private, loopback,
+  metadata, and reserved destinations by design. Use a public URL.
+- **A shell command needs approval every time** — this is intentional. Even a
+  session network grant never applies to `shell`.
 - **Slow coding responses** — reduce `ARC_NUM_CTX` to 4096 and keep
   `OLLAMA_MAX_LOADED_MODELS=1`.
 

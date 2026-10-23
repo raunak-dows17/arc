@@ -1,4 +1,5 @@
 import type { AgentProfile } from "../../domain/entities/agent-profile.js";
+import type { EventBusPort } from "../../domain/events/agent-event.js";
 import type { ApprovalPort } from "../../domain/ports/approval.port.js";
 import type {
   ToolDefinition,
@@ -13,6 +14,8 @@ export interface ToolOutcome {
   observation: string;
 }
 
+const WRITE_TOOLS = new Set(["write_file", "replace_in_file"]);
+
 /**
  * Validates and dispatches a single tool call. Profile allowlists are enforced
  * here as well as in the prompt, so a hallucinated tool name cannot escape the
@@ -24,6 +27,7 @@ export class ExecuteToolUseCase {
   constructor(
     private readonly registry: ToolRegistry,
     private readonly approval?: ApprovalPort,
+    private readonly events?: EventBusPort,
   ) {}
 
   async execute(
@@ -84,7 +88,28 @@ export class ExecuteToolUseCase {
     definition: ToolDefinition,
     context: ToolExecutionContext,
   ): Promise<string | null> {
+    const risk = definition.risk ?? "read";
+    const mode = definition.approvalMode ?? "always";
+    const channel = context.channel ?? "cli";
+
+    this.events?.emit("approval.requested", {
+      sessionId: context.sessionId,
+      agentId: context.agentId,
+      data: {
+        tool: call.name,
+        risk,
+        mode,
+        channel,
+        args: call.args,
+      },
+    });
+
     if (!this.approval) {
+      this.emitDecision(context, call.name, risk, mode, {
+        approved: false,
+        decidedBy: "unavailable",
+        reason: "No approval channel is available.",
+      });
       return `Tool "${call.name}" requires human approval, but no approval channel is available.`;
     }
 
@@ -92,14 +117,16 @@ export class ExecuteToolUseCase {
       {
         toolName: call.name,
         args: call.args,
-        risk: definition.risk ?? "read",
+        risk,
         reason: definition.description,
-        channel: context.channel ?? "cli",
+        channel,
         sessionId: context.sessionId,
         ...(context.turnId ? { turnId: context.turnId } : {}),
+        mode,
       },
       context.signal,
     );
+    this.emitDecision(context, call.name, risk, mode, decision);
 
     if (decision.approved) {
       return null;
@@ -108,9 +135,38 @@ export class ExecuteToolUseCase {
     return `Approval denied for "${call.name}" (${decision.decidedBy})${decision.reason ? `: ${decision.reason}` : "."}`;
   }
 
+  private emitDecision(
+    context: ToolExecutionContext,
+    tool: string,
+    risk: NonNullable<ToolDefinition["risk"]>,
+    mode: NonNullable<ToolDefinition["approvalMode"]>,
+    decision: {
+      approved: boolean;
+      decidedBy: string;
+      reason?: string;
+    },
+  ): void {
+    this.events?.emit("approval.decided", {
+      sessionId: context.sessionId,
+      agentId: context.agentId,
+      data: {
+        tool,
+        risk,
+        mode,
+        channel: context.channel ?? "cli",
+        approved: decision.approved,
+        decidedBy: decision.decidedBy,
+        reason: decision.reason ?? null,
+      },
+    });
+  }
+
   private blockedReason(name: string, profile: AgentProfile): string | null {
-    if (name === "write_file" && profile.readOnly) {
-      return `Profile "${profile.id}" is read-only; write_file is blocked.`;
+    if (profile.readOnly && WRITE_TOOLS.has(name)) {
+      return `Profile "${profile.id}" is read-only; ${name} is blocked.`;
+    }
+    if (profile.readOnly && name === "shell") {
+      return `Profile "${profile.id}" is read-only; shell is blocked.`;
     }
     if (name === "remember" && !profile.memoryWrite) {
       return `Profile "${profile.id}" may not write memory; remember is blocked.`;

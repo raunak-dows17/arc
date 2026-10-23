@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
   ApprovalDecision,
+  ApprovalMode,
   ApprovalPort,
   ApprovalRequest,
 } from "../../domain/ports/approval.port.js";
@@ -18,10 +19,15 @@ export interface ApprovalServiceOptions {
 /**
  * Fails closed. A prompt may approve or deny; a timeout, abort, or prompt error
  * becomes a denial so unattended agents can never self-approve.
+ *
+ * Session grants are deliberately narrow: they only apply to tools that
+ * declare "session" mode, and the grant key includes the session id. Shell
+ * commands always use "always" mode and can never be remembered.
  */
 export class ApprovalService implements ApprovalPort {
   private readonly ttlMs: number;
   private readonly now: () => number;
+  private readonly sessionGrants = new Set<string>();
 
   constructor(
     private readonly prompt: ApprovalPromptPort,
@@ -43,9 +49,20 @@ export class ApprovalService implements ApprovalPort {
       };
     }
 
+    const mode: ApprovalMode = request.mode ?? "always";
+    const grantKey = this.grantKey(request, mode);
+    if (mode === "session" && this.sessionGrants.has(grantKey)) {
+      return {
+        approved: true,
+        decidedBy: "session",
+        reason: "Approved earlier in this session.",
+      };
+    }
+
     const expiresAt = this.now() + this.ttlMs;
     const fullRequest: ApprovalRequest = {
       ...request,
+      mode,
       id: randomUUID(),
       expiresAt,
     };
@@ -78,7 +95,21 @@ export class ApprovalService implements ApprovalPort {
     });
 
     try {
-      return await Promise.race([this.prompt.ask(fullRequest), timeout, aborted]);
+      const decision = await Promise.race([
+        this.prompt.ask(fullRequest),
+        timeout,
+        aborted,
+      ]);
+
+      if (
+        decision.approved &&
+        mode === "session" &&
+        decision.rememberForSession
+      ) {
+        this.sessionGrants.add(grantKey);
+      }
+
+      return decision;
     } catch (error) {
       if (error instanceof ApprovalError) {
         return {
@@ -103,6 +134,25 @@ export class ApprovalService implements ApprovalPort {
         signal.removeEventListener("abort", abortListener);
       }
     }
+  }
+
+  /** Forget all session grants. Useful when the active session is replaced. */
+  clearSession(sessionId: string): void {
+    const prefix = `${sessionId}\u0000`;
+    for (const key of this.sessionGrants) {
+      if (key.startsWith(prefix)) {
+        this.sessionGrants.delete(key);
+      }
+    }
+  }
+
+  private grantKey(
+    request: Omit<ApprovalRequest, "id" | "expiresAt">,
+    mode: ApprovalMode,
+  ): string {
+    return [request.sessionId, mode, request.toolName, request.risk].join(
+      "\u0000",
+    );
   }
 }
 

@@ -6,6 +6,7 @@ import { after, before, describe, it } from "node:test";
 import { loadConfig } from "../infrastructure/config/env.js";
 import { runDoctor } from "../infrastructure/cli/doctor.js";
 import { InMemorySecretStore } from "../infrastructure/secrets/in-memory.secret-store.js";
+import { SECRET_ACCOUNTS } from "../shared/secret-accounts.js";
 
 function tagsResponse(models: string[]): Response {
   return new Response(
@@ -30,13 +31,15 @@ describe("runDoctor", () => {
       ARC_HOME: path.join(base, "home"),
       ARC_WORKSPACE: path.join(base, "workspace"),
     } as NodeJS.ProcessEnv);
+    const secrets = new InMemorySecretStore();
+    await secrets.set(SECRET_ACCOUNTS.braveApiKey, "test-key");
 
     const report = await runDoctor(config, {
       platform: "win32",
       nodeVersion: "22.0.0",
       totalMemory: 16 * 1024 ** 3,
       freeMemory: 8 * 1024 ** 3,
-      secretStore: new InMemorySecretStore(),
+      secretStore: secrets,
       fetchImpl: async () =>
         tagsResponse([
           "qwen3:8b",
@@ -48,6 +51,10 @@ describe("runDoctor", () => {
     assert.equal(report.ok, true);
     assert.equal(
       report.checks.find((check) => check.id === "keyring")?.status,
+      "ok",
+    );
+    assert.equal(
+      report.checks.find((check) => check.id === "brave")?.status,
       "ok",
     );
     assert.equal(

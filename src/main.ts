@@ -1,6 +1,6 @@
 import { realpath } from "node:fs/promises";
 import path from "node:path";
-import { ApprovalService, DenyAllApprovalPrompt } from "./application/services/approval.service.js";
+import { ApprovalService } from "./application/services/approval.service.js";
 import { ContextAssembler } from "./application/services/context-assembler.js";
 import { ModelRouter } from "./application/services/model-router.js";
 import { PolicyEnforcingSandbox } from "./application/services/policy-enforcing-sandbox.js";
@@ -13,6 +13,8 @@ import { PathPolicy } from "./domain/services/path-policy.js";
 import { ensureArcHome } from "./infrastructure/bootstrap/arc-home.js";
 import { ChatRepl } from "./infrastructure/cli/repl.js";
 import { printDoctorReport, runDoctor } from "./infrastructure/cli/doctor.js";
+import { InteractiveApprovalPrompt } from "./infrastructure/cli/interactive-approval.prompt.js";
+import { runSecretsCommand } from "./infrastructure/cli/secrets.js";
 import { TerminalRenderer } from "./infrastructure/cli/terminal.renderer.js";
 import { loadConfig } from "./infrastructure/config/env.js";
 import { InMemoryEventBus } from "./infrastructure/events/in-memory-event-bus.js";
@@ -26,23 +28,38 @@ import { JsonSessionStore } from "./infrastructure/persistence/json-session.stor
 import { JsonSubAgentRepository } from "./infrastructure/persistence/json-sub-agent.repository.js";
 import { MarkdownAgentProfileRepository } from "./infrastructure/profiles/markdown-profile.repository.js";
 import { NodeFsSandboxAdapter } from "./infrastructure/sandbox/node-fs-sandbox.adapter.js";
+import { NapiKeyringSecretStore } from "./infrastructure/secrets/napi-keyring.secret-store.js";
 import { MarkdownSkillRepository } from "./infrastructure/skills/markdown-skill.repository.js";
+import { BraveWebSearchTool } from "./infrastructure/tools/brave-web-search.tool.js";
 import { ListFilesTool } from "./infrastructure/tools/list-files.tool.js";
 import { LoadSkillTool } from "./infrastructure/tools/load-skill.tool.js";
 import { MemoryGetTool, MemorySearchTool } from "./infrastructure/tools/memory-search.tool.js";
 import { ReadFileTool } from "./infrastructure/tools/read-file.tool.js";
 import { RememberTool } from "./infrastructure/tools/remember.tool.js";
+import { ReplaceInFileTool } from "./infrastructure/tools/replace-in-file.tool.js";
 import { RunAgentTool } from "./infrastructure/tools/run-agent.tool.js";
+import { SearchFilesTool } from "./infrastructure/tools/search-files.tool.js";
+import { ShellTool } from "./infrastructure/tools/shell.tool.js";
+import { WebFetchTool } from "./infrastructure/tools/web-fetch.tool.js";
 import { WriteFileTool } from "./infrastructure/tools/write-file.tool.js";
 import { errorMessage } from "./shared/text.js";
 
 async function main(): Promise<void> {
+  const secretStore = new NapiKeyringSecretStore();
+  if (process.argv[2] === "secrets") {
+    process.exitCode = await runSecretsCommand(
+      secretStore,
+      process.argv.slice(3),
+    );
+    return;
+  }
+
   const config = loadConfig();
   const renderer = new TerminalRenderer();
 
   if (process.argv[2] === "doctor") {
     await ensureArcHome(config);
-    const report = await runDoctor(config);
+    const report = await runDoctor(config, { secretStore });
     printDoctorReport(report);
     process.exitCode = report.ok ? 0 : 1;
     return;
@@ -94,11 +111,39 @@ async function main(): Promise<void> {
   await skills.reload();
 
   const standingOrders = new MarkdownStandingOrders(config.standingOrdersPath);
+  const approvalPrompt = new InteractiveApprovalPrompt();
 
   const registry = new ToolRegistry();
   registry.register(new ListFilesTool(sandbox));
   registry.register(new ReadFileTool(sandbox));
   registry.register(new WriteFileTool(sandbox));
+  registry.register(new SearchFilesTool(sandbox));
+  registry.register(new ReplaceInFileTool(sandbox));
+  registry.register(
+    new BraveWebSearchTool({
+      secrets: secretStore,
+      searchUrl: config.web.searchUrl,
+      timeoutMs: config.web.searchTimeoutMs,
+      maxResults: config.web.maxResults,
+      cacheTtlMs: config.web.cacheTtlMs,
+    }),
+  );
+  registry.register(
+    new WebFetchTool({
+      timeoutMs: config.web.fetchTimeoutMs,
+      maxBytes: config.web.maxBytes,
+      maxChars: config.web.maxChars,
+      maxRedirects: config.web.maxRedirects,
+      cacheTtlMs: config.web.cacheTtlMs,
+    }),
+  );
+  registry.register(
+    new ShellTool({
+      cwd: sandbox.root,
+      timeoutMs: config.shell.timeoutMs,
+      maxOutputBytes: config.shell.maxOutputBytes,
+    }),
+  );
   registry.register(new MemorySearchTool(memory));
   registry.register(new MemoryGetTool(memory));
   registry.register(new RememberTool(memory, events));
@@ -137,7 +182,7 @@ async function main(): Promise<void> {
   });
   const sessionStore = new JsonSessionStore(config.sessionDir);
   const subAgentRuns = new JsonSubAgentRepository(config.runDir);
-  const approvals = new ApprovalService(new DenyAllApprovalPrompt());
+  const approvals = new ApprovalService(approvalPrompt);
 
   const relativeWorkspace =
     path.relative(process.cwd(), sandbox.root) || path.basename(sandbox.root);
@@ -165,7 +210,7 @@ async function main(): Promise<void> {
     keepRecentMessages: config.agent.keepRecentMessages,
   });
 
-  const executeTool = new ExecuteToolUseCase(registry, approvals);
+  const executeTool = new ExecuteToolUseCase(registry, approvals, events);
   const subAgentRunner = new SubAgentRunner(
     {
       profiles,
@@ -221,6 +266,7 @@ async function main(): Promise<void> {
     assembler,
     events,
     memoryAutoCapture: config.agent.memoryAutoCapture,
+    approvalPrompt,
   });
 
   await repl.start();

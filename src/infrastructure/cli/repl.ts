@@ -3,6 +3,10 @@ import pc from "picocolors";
 import type { AgentProfile } from "../../domain/entities/agent-profile.js";
 import { AgentSession } from "../../domain/entities/agent-session.js";
 import type { EventBusPort } from "../../domain/events/agent-event.js";
+import type {
+  ApprovalDecision,
+  ApprovalRequest,
+} from "../../domain/ports/approval.port.js";
 import type { MemoryStorePort } from "../../domain/ports/memory-store.port.js";
 import type { AgentProfileRepositoryPort } from "../../domain/ports/profile-repository.port.js";
 import type { SandboxPort } from "../../domain/ports/sandbox.port.js";
@@ -16,6 +20,10 @@ import type { ContextAssembler } from "../../application/services/context-assemb
 import type { ToolRegistry } from "../../application/services/tool-registry.js";
 import type { CompactSessionUseCase } from "../../application/usecases/compact-session.usecase.js";
 import type { RunAgentTurnUseCase } from "../../application/usecases/run-agent-turn.usecase.js";
+import {
+  parseApprovalAnswer,
+  type InteractiveApprovalPrompt,
+} from "./interactive-approval.prompt.js";
 import type { TerminalRenderer } from "./terminal.renderer.js";
 
 export interface ChatReplDeps {
@@ -36,6 +44,7 @@ export interface ChatReplDeps {
   assembler: ContextAssembler;
   events: EventBusPort;
   memoryAutoCapture: boolean;
+  approvalPrompt?: InteractiveApprovalPrompt;
 }
 
 export class ChatRepl {
@@ -99,6 +108,9 @@ export class ChatRepl {
       removeHistoryDuplicates: true,
     });
     this.rl = rl;
+    this.deps.approvalPrompt?.setHandler((request) =>
+      this.askApproval(request),
+    );
 
     let idleInterrupts = 0;
     rl.on("SIGINT", () => {
@@ -160,6 +172,7 @@ export class ChatRepl {
       process.off("SIGINT", onProcessSigint);
       this.detachTurnInput();
       this.deps.renderer.stopThinking();
+      this.deps.approvalPrompt?.setHandler(null);
       rl.close();
       this.deps.renderer.info("Goodbye.");
     }
@@ -180,6 +193,10 @@ export class ChatRepl {
   }
 
   private ask(rl: Interface): Promise<string | null> {
+    return this.question(rl, `${pc.cyan("›")} `);
+  }
+
+  private question(rl: Interface, prompt: string): Promise<string | null> {
     return new Promise((resolve) => {
       let settled = false;
       const onClose = (): void => {
@@ -190,7 +207,7 @@ export class ChatRepl {
       };
 
       rl.once("close", onClose);
-      rl.question(`${pc.cyan("›")} `, (answer) => {
+      rl.question(prompt, (answer) => {
         if (settled) {
           return;
         }
@@ -199,6 +216,71 @@ export class ChatRepl {
         resolve(answer);
       });
     });
+  }
+
+  private async askApproval(
+    request: ApprovalRequest,
+  ): Promise<ApprovalDecision> {
+    const rl = this.rl;
+    if (!rl || this.closed || !process.stdin.isTTY) {
+      return {
+        approved: false,
+        decidedBy: "policy",
+        reason:
+          "No interactive terminal is available for approval. Run ARC directly in a terminal.",
+      };
+    }
+
+    this.deps.renderer.stopThinking();
+    this.deps.renderer.approvalRequest(request);
+    this.detachTurnInput();
+
+    try {
+      const answer = await this.question(
+        rl,
+        this.deps.renderer.approvalQuestion(request.mode),
+      );
+      if (answer === null) {
+        return {
+          approved: false,
+          decidedBy: "closed",
+          reason: "The terminal closed before approval.",
+        };
+      }
+
+      const parsed = parseApprovalAnswer(answer, request.mode);
+      if (!parsed.approved) {
+        this.deps.renderer.info("Action denied.");
+        return {
+          approved: false,
+          decidedBy: "user",
+          reason: "The user declined this action.",
+        };
+      }
+
+      if (parsed.rememberForSession) {
+        this.deps.renderer.info(
+          "Approved for this session. Shell commands still require approval every time.",
+        );
+      }
+      return {
+        approved: true,
+        decidedBy: "user",
+        ...(parsed.rememberForSession
+          ? { rememberForSession: true }
+          : {}),
+      };
+    } catch (error) {
+      return {
+        approved: false,
+        decidedBy: "error",
+        reason: errorMessage(error),
+      };
+    } finally {
+      if (this.running) {
+        this.attachTurnInput();
+      }
+    }
   }
 
   private async handleCommand(input: string): Promise<boolean> {
@@ -472,6 +554,7 @@ export class ChatRepl {
         profile,
         prompt,
         signal,
+        channel: "cli",
         callbacks: {
           onThinkingStart: () => this.deps.renderer.startThinking(),
           onThinkingEnd: () => this.deps.renderer.stopThinking(),

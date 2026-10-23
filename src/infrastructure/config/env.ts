@@ -62,6 +62,17 @@ const envSchema = z.object({
   MAX_SUBAGENTS_PER_TURN: z.coerce.number().int().min(0).max(10).optional(),
   ARC_MAX_SUBAGENT_RUN_MS: z.coerce.number().int().min(10_000).optional(),
   MAX_SUBAGENT_RUN_MS: z.coerce.number().int().min(10_000).optional(),
+
+  ARC_WEB_SEARCH_URL: optionalString,
+  ARC_WEB_SEARCH_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).optional(),
+  ARC_WEB_FETCH_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).optional(),
+  ARC_WEB_MAX_BYTES: z.coerce.number().int().min(16_000).max(5_000_000).optional(),
+  ARC_WEB_MAX_CHARS: z.coerce.number().int().min(1_000).max(100_000).optional(),
+  ARC_WEB_MAX_REDIRECTS: z.coerce.number().int().min(0).max(5).optional(),
+  ARC_WEB_CACHE_TTL_MS: z.coerce.number().int().min(0).max(3_600_000).optional(),
+  ARC_WEB_MAX_RESULTS: z.coerce.number().int().min(1).max(10).optional(),
+  ARC_SHELL_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(300_000).optional(),
+  ARC_SHELL_MAX_OUTPUT_BYTES: z.coerce.number().int().min(4_000).max(1_000_000).optional(),
 });
 
 export interface OllamaConfig {
@@ -98,6 +109,20 @@ export interface AppConfig {
     maxDepth: number;
     maxPerTurn: number;
     maxRunMs: number;
+  };
+  web: {
+    searchUrl: string;
+    searchTimeoutMs: number;
+    fetchTimeoutMs: number;
+    maxBytes: number;
+    maxChars: number;
+    maxRedirects: number;
+    cacheTtlMs: number;
+    maxResults: number;
+  };
+  shell: {
+    timeoutMs: number;
+    maxOutputBytes: number;
   };
   /** Private ARC state: memory, skills, profiles, sessions, audit. */
   arcHome: string;
@@ -189,6 +214,22 @@ export function loadConfig(raw: NodeJS.ProcessEnv = process.env): AppConfig {
         env.ARC_MAX_SUBAGENTS_PER_TURN ?? env.MAX_SUBAGENTS_PER_TURN ?? 2,
       maxRunMs:
         env.ARC_MAX_SUBAGENT_RUN_MS ?? env.MAX_SUBAGENT_RUN_MS ?? 300_000,
+    },
+    web: {
+      searchUrl:
+        env.ARC_WEB_SEARCH_URL ??
+        "https://api.search.brave.com/res/v1/web/search",
+      searchTimeoutMs: env.ARC_WEB_SEARCH_TIMEOUT_MS ?? 15_000,
+      fetchTimeoutMs: env.ARC_WEB_FETCH_TIMEOUT_MS ?? 20_000,
+      maxBytes: env.ARC_WEB_MAX_BYTES ?? 512 * 1024,
+      maxChars: env.ARC_WEB_MAX_CHARS ?? 20_000,
+      maxRedirects: env.ARC_WEB_MAX_REDIRECTS ?? 3,
+      cacheTtlMs: env.ARC_WEB_CACHE_TTL_MS ?? 5 * 60_000,
+      maxResults: env.ARC_WEB_MAX_RESULTS ?? 8,
+    },
+    shell: {
+      timeoutMs: env.ARC_SHELL_TIMEOUT_MS ?? 60_000,
+      maxOutputBytes: env.ARC_SHELL_MAX_OUTPUT_BYTES ?? 64 * 1024,
     },
     arcHome,
     workspaceDir,

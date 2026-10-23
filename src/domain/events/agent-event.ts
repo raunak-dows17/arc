@@ -3,6 +3,8 @@ export type AgentEventType =
   | "turn.finished"
   | "tool.started"
   | "tool.finished"
+  | "approval.requested"
+  | "approval.decided"
   | "memory.written"
   | "subagent.started"
   | "subagent.finished";

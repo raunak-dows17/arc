@@ -9,6 +9,10 @@ import type { SubAgentRun } from "../../domain/entities/sub-agent-run.js";
 import type { SandboxEntry } from "../../domain/ports/sandbox.port.js";
 import type { SessionSummary } from "../../domain/ports/session-store.port.js";
 import type { ToolDefinition } from "../../domain/ports/tool.port.js";
+import type {
+  ApprovalMode,
+  ApprovalRequest,
+} from "../../domain/ports/approval.port.js";
 import type { ToolCall } from "../../domain/value-objects/tool-call.js";
 import type { ToolOutcome } from "../../application/usecases/execute-tool.usecase.js";
 import { singleLine } from "../../shared/text.js";
@@ -132,6 +136,36 @@ export class TerminalRenderer {
       outcome.observation.split(/\r?\n/).filter(Boolean).length > 2 ? " …" : "";
     const marker = outcome.ok ? green("✓") : red("✗");
     console.log(`  ${marker} ${dim(preview)}${dim(suffix)}`);
+  }
+
+  approvalRequest(request: ApprovalRequest): void {
+    this.spinner.stop();
+    console.log();
+    console.log(
+      `  ${yellow("approval")} ${bold(request.toolName)} ${dim(`· ${request.risk} · ${request.channel} · ${request.mode}`)}`,
+    );
+    console.log(`  ${dim("target")} ${describeApprovalTarget(request.args)}`);
+    console.log(`  ${dim("reason")} ${singleLine(request.reason, 220)}`);
+    if (request.risk === "shell") {
+      console.log(
+        dim(
+          "  warning  Runs with your user privileges and can access files outside the workspace.",
+        ),
+      );
+    }
+    if (request.mode === "session") {
+      console.log(
+        dim(
+          "  note     One network grant covers this tool for the current session.",
+        ),
+      );
+    }
+  }
+
+  approvalQuestion(mode: ApprovalMode): string {
+    return mode === "session"
+      ? `  ${yellow("Approve?")} ${dim("[y] once · [s] this session · [n] no")} `
+      : `  ${yellow("Approve?")} ${dim("[y] once · [n] no")} `;
   }
 
   subAgentStarted(input: {
@@ -459,4 +493,28 @@ export class TerminalRenderer {
     }
     console.log();
   }
+}
+
+function describeApprovalTarget(args: unknown): string {
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    const record = args as Record<string, unknown>;
+    if (typeof record.command === "string") {
+      return singleLine(record.command, 700);
+    }
+    if (typeof record.url === "string") {
+      return singleLine(record.url, 700);
+    }
+    if (typeof record.query === "string") {
+      const count =
+        typeof record.count === "number" ? ` · count ${record.count}` : "";
+      return singleLine(`"${record.query}"${count}`, 600);
+    }
+    if (
+      typeof record.path === "string" &&
+      typeof record.old_string === "string"
+    ) {
+      return `${record.path} · replace ${record.old_string.length} char(s)`;
+    }
+  }
+  return singleLine(JSON.stringify(args ?? null), 600);
 }

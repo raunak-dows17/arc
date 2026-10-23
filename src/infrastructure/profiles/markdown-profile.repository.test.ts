@@ -65,6 +65,14 @@ describe("MarkdownAgentProfileRepository", () => {
     assert.ok(ids.includes("arc"));
     assert.ok(ids.includes("reviewer"));
     assert.ok(ids.includes("writer"));
+    assert.ok(ids.includes("coder"));
     assert.ok(!ids.includes("broken"));
+
+    const coder = all.find((profile) => profile.id === "coder");
+    assert.ok(coder);
+    assert.equal(coder.readOnly, false);
+    assert.ok(coder.allowsTool("shell"));
+    assert.ok(coder.allowsTool("replace_in_file"));
+    assert.ok(coder.allowsTool("web_search"));
   });
 });

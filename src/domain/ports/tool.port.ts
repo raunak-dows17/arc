@@ -1,5 +1,6 @@
 import type {
   ApprovalChannel,
+  ApprovalMode,
   ApprovalRisk,
 } from "./approval.port.js";
 
@@ -12,6 +13,8 @@ export interface ToolDefinition {
   risk?: ApprovalRisk;
   /** Defaults to false. Set true for shell, network-write, and external actions. */
   requiresApproval?: boolean;
+  /** Defaults to "always" when approval is required. */
+  approvalMode?: ApprovalMode;
 }
 
 export interface ToolExecutionContext {

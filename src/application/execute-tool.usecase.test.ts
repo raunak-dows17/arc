@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { AgentProfile } from "../domain/entities/agent-profile.js";
 import type { ApprovalPort } from "../domain/ports/approval.port.js";
+import type { ApprovalMode } from "../domain/ports/approval.port.js";
 import type { ToolDefinition, ToolPort } from "../domain/ports/tool.port.js";
 import { ToolCall } from "../domain/value-objects/tool-call.js";
+import { InMemoryEventBus } from "../infrastructure/events/in-memory-event-bus.js";
 import { ToolRegistry } from "./services/tool-registry.js";
 import { ExecuteToolUseCase } from "./usecases/execute-tool.usecase.js";
 
@@ -11,6 +13,7 @@ class NamedTool implements ToolPort {
   constructor(
     private readonly name: string,
     private readonly requiresApproval = false,
+    private readonly approvalMode: ApprovalMode = "always",
   ) {}
 
   getDefinition(): ToolDefinition {
@@ -20,6 +23,7 @@ class NamedTool implements ToolPort {
       parameters: { type: "object" },
       risk: "shell",
       requiresApproval: this.requiresApproval,
+      approvalMode: this.approvalMode,
     };
   }
 
@@ -51,7 +55,14 @@ function profile(overrides: {
 
 function harness(): ExecuteToolUseCase {
   const registry = new ToolRegistry();
-  for (const name of ["echo", "write_file", "remember", "run_agent"]) {
+  for (const name of [
+    "echo",
+    "write_file",
+    "replace_in_file",
+    "remember",
+    "run_agent",
+    "shell",
+  ]) {
     registry.register(new NamedTool(name));
   }
   return new ExecuteToolUseCase(registry);
@@ -77,6 +88,20 @@ describe("ExecuteToolUseCase profile policy", () => {
       undefined,
       readOnly,
     );
+    const replace = await execute.execute(
+      ToolCall.create("replace_in_file", {
+        path: "a.txt",
+        old_string: "a",
+        new_string: "b",
+      }),
+      undefined,
+      readOnly,
+    );
+    const shell = await execute.execute(
+      ToolCall.create("shell", { command: "npm test" }),
+      undefined,
+      readOnly,
+    );
     const allowed = await execute.execute(
       ToolCall.create("echo", { value: 1 }),
       undefined,
@@ -89,6 +114,10 @@ describe("ExecuteToolUseCase profile policy", () => {
     assert.match(remember.observation, /may not write memory/);
     assert.equal(spawn.ok, false);
     assert.match(spawn.observation, /may not spawn/);
+    assert.equal(replace.ok, false);
+    assert.match(replace.observation, /read-only/);
+    assert.equal(shell.ok, false);
+    assert.match(shell.observation, /read-only/);
     assert.equal(allowed.ok, true);
     assert.equal(allowed.observation, "echo ok");
   });
@@ -168,6 +197,53 @@ describe("ExecuteToolUseCase profile policy", () => {
     );
     assert.equal(denied.ok, false);
     assert.match(denied.observation, /Approval denied/);
+  });
+
+  it("passes the tool approval mode to the approval boundary", async () => {
+    const registry = new ToolRegistry();
+    registry.register(new NamedTool("web_fetch", true, "session"));
+    let capturedMode: string | undefined;
+    const approval: ApprovalPort = {
+      async request(request) {
+        capturedMode = request.mode;
+        return { approved: true, decidedBy: "test" };
+      },
+    };
+    const execute = new ExecuteToolUseCase(registry, approval);
+
+    const outcome = await execute.execute(
+      ToolCall.create("web_fetch", { url: "https://example.com" }),
+      { sessionId: "s", agentId: "arc", depth: 0, channel: "cli" },
+      profile({ tools: "*", readOnly: true }),
+    );
+
+    assert.equal(outcome.ok, true, outcome.observation);
+    assert.equal(capturedMode, "session");
+  });
+
+  it("records approval requests and decisions in the event stream", async () => {
+    const registry = new ToolRegistry();
+    registry.register(new NamedTool("web_fetch", true, "session"));
+    const events = new InMemoryEventBus();
+    const seen: string[] = [];
+    events.on("*", (event) => seen.push(event.type));
+    const approval: ApprovalPort = {
+      async request() {
+        return { approved: true, decidedBy: "user" };
+      },
+    };
+    const execute = new ExecuteToolUseCase(registry, approval, events);
+
+    await execute.execute(
+      ToolCall.create("web_fetch", { url: "https://example.com" }),
+      { sessionId: "s", agentId: "arc", depth: 0, channel: "cli" },
+      profile({ tools: "*", readOnly: true }),
+    );
+
+    assert.deepEqual(
+      seen.filter((type) => type.startsWith("approval.")),
+      ["approval.requested", "approval.decided"],
+    );
   });
 
   it("returns unknown tools as recoverable observations", async () => {
