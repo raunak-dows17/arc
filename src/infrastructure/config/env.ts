@@ -27,6 +27,7 @@ const envSchema = z.object({
   ARC_OLLAMA_BASE_URL: optionalString,
   OLLAMA_BASE_URL: optionalString,
   ARC_MODEL_PROVIDER: optionalString,
+  ARC_MODEL_MODE: z.enum(["local", "hybrid", "cloud"]).optional(),
   ARC_MODEL: optionalString,
   OLLAMA_MODEL: optionalString,
   ARC_CODING_MODEL: optionalString,
@@ -220,7 +221,7 @@ export function loadConfig(raw: NodeJS.ProcessEnv = process.env): AppConfig {
   const workspaceDir = path.resolve(
     env.ARC_WORKSPACE ?? env.WORKSPACE_DIR ?? env.SANDBOX_DIR ?? "./sandbox",
   );
-  const models = loadModelSettings({
+  const loadedModels = loadModelSettings({
     arcHome,
     env: raw,
     legacy: {
@@ -231,6 +232,9 @@ export function loadConfig(raw: NodeJS.ProcessEnv = process.env): AppConfig {
       decision: decisionModel,
     },
   });
+  const models = env.ARC_MODEL_MODE
+    ? { ...loadedModels, mode: env.ARC_MODEL_MODE }
+    : loadedModels;
   const emailEnabled = booleanValue(env.ARC_EMAIL_ENABLED, false);
   const emailAddress = env.ARC_EMAIL_ADDRESS ?? "";
   if (emailEnabled && !emailAddress) {

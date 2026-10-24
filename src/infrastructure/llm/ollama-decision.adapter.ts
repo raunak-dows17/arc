@@ -58,9 +58,10 @@ export interface OllamaDecisionOptions {
 }
 
 /**
- * Client for Ollama's /v1/systemone decision endpoint (Tev1, Nimble, Clef).
- * This adapter is deliberately separate from the tool-calling chat adapter:
- * decision models answer named questions and do not emit agent actions.
+ * Client for the System One decision endpoint (Ollama/Tev1, Colibrì/Laya,
+ * Nimble, Clef). This adapter is deliberately separate from the tool-calling
+ * chat adapter: decision models answer named questions and do not emit agent
+ * actions.
  */
 export class OllamaDecisionAdapter implements DecisionModelPort {
   private readonly baseUrl: string;
@@ -70,7 +71,8 @@ export class OllamaDecisionAdapter implements DecisionModelPort {
     private readonly config: OllamaDecisionConfig,
     options: OllamaDecisionOptions = {},
   ) {
-    this.baseUrl = config.baseUrl.replace(/\/+$/, "");
+    const base = config.baseUrl.replace(/\/+$/, "");
+    this.baseUrl = base.endsWith("/v1") ? base : `${base}/v1`;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
@@ -84,7 +86,7 @@ export class OllamaDecisionAdapter implements DecisionModelPort {
 
     let response: Response;
     try {
-      response = await this.fetchImpl(`${this.baseUrl}/v1/systemone`, {
+      response = await this.fetchImpl(`${this.baseUrl}/systemone`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -116,8 +118,11 @@ export class OllamaDecisionAdapter implements DecisionModelPort {
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
       if (response.status === 404) {
+        const hint = this.baseUrl.includes(":11434")
+          ? ` Run: ollama pull ${this.config.model}`
+          : " Install or pull the model for the configured local runtime.";
         throw new DecisionModelError(
-          `Decision model "${this.config.model}" was not found. Run: ollama pull ${this.config.model}`,
+          `Decision model "${this.config.model}" was not found.${hint}`,
         );
       }
       throw new DecisionModelError(
@@ -128,7 +133,7 @@ export class OllamaDecisionAdapter implements DecisionModelPort {
     const parsed = responseSchema.safeParse(await response.json());
     if (!parsed.success) {
       throw new DecisionModelError(
-        "Unexpected response shape from Ollama /v1/systemone.",
+        "Unexpected response shape from the System One decision endpoint.",
       );
     }
 

@@ -8,6 +8,7 @@ import type {
 } from "../../domain/ports/llm.port.js";
 import type { ModelSelection } from "../config/models.js";
 import { LlmError } from "../../domain/errors/agent.errors.js";
+import type { ProviderHealthRegistry } from "../models/provider-health.js";
 
 export type ProviderLlm = LLMPort & TextGenerationPort;
 
@@ -19,27 +20,64 @@ export class RoutingLlmAdapter implements LLMPort, TextGenerationPort {
   constructor(
     private readonly providers: Readonly<Record<string, ProviderLlm>>,
     private readonly defaultSelection: ModelSelection,
+    private readonly health?: ProviderHealthRegistry,
   ) {}
 
-  generateDecision(request: LlmRequest): Promise<LlmDecisionResult> {
+  async generateDecision(request: LlmRequest): Promise<LlmDecisionResult> {
     const selection = this.selection(request.provider, request.model);
-    return this.provider(selection.provider).generateDecision({
-      ...request,
-      provider: selection.provider,
-      model: selection.model,
-    });
+    const started = Date.now();
+    try {
+      const result = await this.provider(selection.provider).generateDecision({
+        ...request,
+        provider: selection.provider,
+        model: selection.model,
+      });
+      this.health?.recordSuccess(
+        selection.provider,
+        selection.model ?? "default",
+        Date.now() - started,
+      );
+      return result;
+    } catch (error) {
+      if (!request.signal?.aborted) {
+        this.health?.recordFailure(
+          selection.provider,
+          selection.model ?? "default",
+          error,
+        );
+      }
+      throw error;
+    }
   }
 
-  generateText(
+  async generateText(
     prompt: string,
     options: TextGenerationOptions = {},
   ): Promise<TextGenerationResult> {
     const selection = this.selection(options.provider, options.model);
-    return this.provider(selection.provider).generateText(prompt, {
-      ...options,
-      provider: selection.provider,
-      model: selection.model,
-    });
+    const started = Date.now();
+    try {
+      const result = await this.provider(selection.provider).generateText(prompt, {
+        ...options,
+        provider: selection.provider,
+        model: selection.model,
+      });
+      this.health?.recordSuccess(
+        selection.provider,
+        selection.model ?? "default",
+        Date.now() - started,
+      );
+      return result;
+    } catch (error) {
+      if (!options.signal?.aborted) {
+        this.health?.recordFailure(
+          selection.provider,
+          selection.model ?? "default",
+          error,
+        );
+      }
+      throw error;
+    }
   }
 
   hasProvider(id: string): boolean {
@@ -85,6 +123,7 @@ export class FallbackLlmAdapter implements LLMPort, TextGenerationPort {
   constructor(
     private readonly primary: ProviderLlm,
     private readonly fallbacks: readonly ModelSelection[],
+    private readonly health?: ProviderHealthRegistry,
   ) {}
 
   async generateDecision(request: LlmRequest): Promise<LlmDecisionResult> {
@@ -117,7 +156,7 @@ export class FallbackLlmAdapter implements LLMPort, TextGenerationPort {
     primaryError: unknown,
   ): Promise<LlmDecisionResult> {
     let lastError = primaryError;
-    for (const fallback of this.fallbacks) {
+    for (const fallback of this.availableFallbacks()) {
       try {
         return await this.primary.generateDecision({
           ...request,
@@ -140,7 +179,7 @@ export class FallbackLlmAdapter implements LLMPort, TextGenerationPort {
     primaryError: unknown,
   ): Promise<TextGenerationResult> {
     let lastError = primaryError;
-    for (const fallback of this.fallbacks) {
+    for (const fallback of this.availableFallbacks()) {
       try {
         return await this.primary.generateText(prompt, {
           ...options,
@@ -155,5 +194,17 @@ export class FallbackLlmAdapter implements LLMPort, TextGenerationPort {
       }
     }
     throw lastError;
+  }
+
+  private availableFallbacks(): readonly ModelSelection[] {
+    if (!this.health) {
+      return this.fallbacks;
+    }
+    const available = this.fallbacks.filter((fallback) =>
+      this.health!.isAvailable(fallback.provider, fallback.model),
+    );
+    // If every fallback is cooling down, try them anyway rather than failing
+    // immediately. The provider may have recovered before the cooldown elapsed.
+    return available.length > 0 ? available : this.fallbacks;
   }
 }

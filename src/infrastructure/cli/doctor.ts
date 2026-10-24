@@ -8,6 +8,7 @@ import { pathComparisonKey } from "../../domain/services/portable-path.js";
 import { SECRET_ACCOUNTS } from "../../shared/secret-accounts.js";
 import { resolveProvider } from "../models/model-runtime.js";
 import { listProviderModels } from "../models/model-discovery.js";
+import { availableMemoryBytes } from "../models/device-profile.js";
 
 export type DoctorStatus = "ok" | "warn" | "fail";
 
@@ -108,7 +109,7 @@ export async function runDoctor(
   checks.push(...(await providerChecks(config, secretStore, fetchImpl)));
 
   const totalMemory = options.totalMemory ?? os.totalmem();
-  const freeMemory = options.freeMemory ?? os.freemem();
+  const freeMemory = options.freeMemory ?? (await availableMemoryBytes());
   const memoryGb = (value: number) => `${(value / 1024 ** 3).toFixed(1)} GB`;
   checks.push({
     id: "memory",

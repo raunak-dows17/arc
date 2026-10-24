@@ -6,7 +6,7 @@ import type {
 import { AgentTurnError } from "../../domain/errors/agent.errors.js";
 import type { EventBusPort } from "../../domain/events/agent-event.js";
 import type { ApprovalChannel } from "../../domain/ports/approval.port.js";
-import type { LLMPort } from "../../domain/ports/llm.port.js";
+import type { LLMPort, LlmDecisionResult } from "../../domain/ports/llm.port.js";
 import type { ToolCall } from "../../domain/value-objects/tool-call.js";
 import { truncateText } from "../../shared/text.js";
 import type { ContextAssembler } from "../services/context-assembler.js";
@@ -82,7 +82,11 @@ export class RunAgentTurnUseCase {
         // Compaction is best-effort; the normal history trim still applies.
       }
 
-      let lastCall: ToolCall | null = null;
+      const executedCalls: Array<{
+        call: ToolCall;
+        observation: string;
+        duplicates: number;
+      }> = [];
 
       for (let step = 0; step < maxSteps; step += 1) {
         input.signal?.throwIfAborted();
@@ -92,18 +96,41 @@ export class RunAgentTurnUseCase {
         let usage;
         try {
           const context = await this.options.assembler.assemble(session, profile);
-          const selection = this.options.modelRouter?.resolveForProfile(
-            profile.id,
-          );
-          const result = await this.llm.generateDecision({
-            systemPrompt: context.systemPrompt,
-            messages: context.messages,
-            tools: context.tools,
-            ...(selection
-              ? { provider: selection.provider, model: selection.model }
-              : {}),
-            ...(input.signal ? { signal: input.signal } : {}),
+          const contextChars =
+            context.systemPrompt.length +
+            context.messages.reduce((sum, message) => sum + message.content.length, 0) +
+            context.tools.length * 200;
+          const plan = this.options.modelRouter?.planForProfile(profile.id, {
+            contextChars,
           });
+          const selections = plan
+            ? [plan.primary, ...plan.fallbacks]
+            : [undefined];
+          let result: LlmDecisionResult | undefined;
+          let lastError: unknown;
+          for (const selection of selections) {
+            try {
+              result = await this.llm.generateDecision({
+                systemPrompt: context.systemPrompt,
+                messages: context.messages,
+                tools: context.tools,
+                ...(selection
+                  ? { provider: selection.provider, model: selection.model }
+                  : {}),
+                ...(input.signal ? { signal: input.signal } : {}),
+              });
+              break;
+            } catch (error) {
+              if (input.signal?.aborted) {
+                throw error;
+              }
+              lastError = error;
+            }
+          }
+          if (!result) {
+            throw lastError ??
+              new AgentTurnError("The model did not return a decision.");
+          }
           decision = result.decision;
           usage = result.usage;
         } finally {
@@ -143,11 +170,24 @@ export class RunAgentTurnUseCase {
           args: call.args,
         });
 
+        const previous = executedCalls.find((entry) => entry.call.equals(call));
         let outcome: ToolOutcome;
-        if (lastCall?.equals(call)) {
+        if (previous) {
+          previous.duplicates += 1;
+          if (previous.duplicates >= 3) {
+            throw new AgentTurnError(
+              `The model repeated the same "${call.name}" call ${previous.duplicates + 1} times. Stop the turn and try a different model or a more specific prompt.`,
+            );
+          }
           outcome = {
             ok: false,
-            observation: `Duplicate call blocked. You already called "${call.name}" with identical arguments. Use the previous result or choose a different action.`,
+            observation: [
+              previous.duplicates === 1
+                ? `Duplicate call blocked. You already called "${call.name}" with identical arguments.`
+                : `You have repeated "${call.name}" with identical arguments ${previous.duplicates + 1} times. Do not call it again.`,
+              `Previous result: ${truncateText(previous.observation, 700)}`,
+              "Choose a different tool or produce a final answer now.",
+            ].join("\n"),
           };
         } else if (
           call.name === "run_agent" &&
@@ -174,7 +214,11 @@ export class RunAgentTurnUseCase {
             },
             profile,
           );
-          lastCall = call;
+          executedCalls.push({
+            call,
+            observation: outcome.observation,
+            duplicates: 0,
+          });
         }
 
         const observation = truncateText(

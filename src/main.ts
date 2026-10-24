@@ -5,6 +5,7 @@ import {
   DenyAllApprovalPrompt,
 } from "./application/services/approval.service.js";
 import { ContextAssembler } from "./application/services/context-assembler.js";
+import { ModelOrchestrator } from "./application/services/model-orchestrator.js";
 import { ModelRouter } from "./application/services/model-router.js";
 import { PolicyEnforcingSandbox } from "./application/services/policy-enforcing-sandbox.js";
 import { ToolRegistry } from "./application/services/tool-registry.js";
@@ -21,20 +22,30 @@ import { InteractiveApprovalPrompt } from "./infrastructure/cli/interactive-appr
 import { runSecretsCommand } from "./infrastructure/cli/secrets.js";
 import { runServeMode } from "./infrastructure/cli/serve.js";
 import {
+  runModeCommand,
   runModelsCommand,
   runProvidersCommand,
   runSetupCommand,
 } from "./infrastructure/cli/setup.js";
 import { TerminalRenderer } from "./infrastructure/cli/terminal.renderer.js";
 import { loadConfig } from "./infrastructure/config/env.js";
+import {
+  parseModelRef,
+  presetProvider,
+} from "./infrastructure/config/models.js";
 import { InMemoryEventBus } from "./infrastructure/events/in-memory-event-bus.js";
 import { JsonlAuditLogger } from "./infrastructure/events/jsonl-audit.logger.js";
 import { FileMemoryStore } from "./infrastructure/memory/file-memory.store.js";
+import { detectDeviceProfile } from "./infrastructure/models/device-profile.js";
+import { ModelCatalog } from "./infrastructure/models/model-catalog.js";
 import {
   checkSelectedOllamaModels,
   createModelRuntime,
   selectionLabel,
+  withDiscoveredLocalModels,
+  type ModelRuntime,
 } from "./infrastructure/models/model-runtime.js";
+import { ProviderHealthRegistry } from "./infrastructure/models/provider-health.js";
 import { MarkdownStandingOrders } from "./infrastructure/memory/markdown-standing-orders.js";
 import { JsonSessionStore } from "./infrastructure/persistence/json-session.store.js";
 import { JsonSubAgentRepository } from "./infrastructure/persistence/json-sub-agent.repository.js";
@@ -72,6 +83,7 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const renderer = new TerminalRenderer();
   const isServe = process.argv[2] === "serve";
+  const pinnedModel = readModelFlag(process.argv.slice(2));
 
   if (process.argv[2] === "doctor") {
     await ensureArcHome(config);
@@ -107,6 +119,11 @@ async function main(): Promise<void> {
       secretStore,
       process.argv.slice(3),
     );
+    return;
+  }
+
+  if (process.argv[2] === "mode") {
+    process.exitCode = await runModeCommand(config, process.argv.slice(3));
     return;
   }
 
@@ -221,12 +238,33 @@ async function main(): Promise<void> {
   registry.register(new RememberTool(memory, events));
   registry.register(new LoadSkillTool(skills));
 
-  const runtime = await createModelRuntime(config, secretStore);
-  for (const warning of await checkSelectedOllamaModels(config, runtime)) {
+  const health = new ProviderHealthRegistry();
+  const modelConfig = await withDiscoveredLocalModels(config);
+  const runtime = await createModelRuntime(modelConfig, secretStore, { health });
+  for (const warning of await checkSelectedOllamaModels(modelConfig, runtime, health)) {
     renderer.warn(warning);
   }
   const llm = runtime.llm;
-  const modelRouter = new ModelRouter(config.models.roles);
+  const device = await detectDeviceProfile(config.workspaceDir);
+  const orchestrator = new ModelOrchestrator({
+    settings: modelConfig.models,
+    catalog: new ModelCatalog(modelConfig.models),
+    health,
+    device,
+  });
+  const modelRouter = new ModelRouter(modelConfig.models.roles, orchestrator);
+  const autoModelName = selectionLabel(
+    resolveMainSelection(modelConfig, modelRouter),
+  );
+  if (pinnedModel) {
+    try {
+      pinModel(pinnedModel, modelConfig, modelRouter, runtime);
+    } catch (error) {
+      renderer.error(errorMessage(error));
+      process.exitCode = 1;
+      return;
+    }
+  }
   const sessionStore = new JsonSessionStore(config.sessionDir);
   const subAgentRuns = new JsonSubAgentRepository(config.runDir);
   const approvals = new ApprovalService(approvalPrompt);
@@ -319,7 +357,12 @@ async function main(): Promise<void> {
     registry,
     runAgentTurn,
     renderer,
-    modelName: selectionLabel(config.models.roles.main),
+    modelName: selectionLabel(resolveMainSelection(modelConfig, modelRouter)),
+    baseModelName: autoModelName,
+    modelMode: modelConfig.models.mode,
+    modelPin: (reference) =>
+      pinModel(reference, modelConfig, modelRouter, runtime),
+    modelPinClear: () => modelRouter.setPin(null),
     arcHome: config.arcHome,
     defaultProfileId: config.agent.defaultProfileId,
     profiles,
@@ -337,6 +380,53 @@ async function main(): Promise<void> {
   });
 
   await repl.start();
+}
+
+function readModelFlag(args: readonly string[]): string | undefined {
+  const index = args.indexOf("--model");
+  if (index === -1) {
+    return undefined;
+  }
+  const value = args[index + 1];
+  if (!value || value.startsWith("--")) {
+    throw new Error("--model requires a provider/model reference.");
+  }
+  return value;
+}
+
+function pinModel(
+  reference: string,
+  config: ReturnType<typeof loadConfig>,
+  router: ModelRouter,
+  runtime: Pick<ModelRuntime, "providers">,
+): { provider: string; model: string } {
+  const selection = parseModelRef(reference);
+  const provider =
+    config.models.providers[selection.provider] ??
+    presetProvider(selection.provider);
+  if (!provider) {
+    throw new Error(
+      `Unknown provider "${selection.provider}". Run arc providers or arc setup first.`,
+    );
+  }
+  if (!runtime.providers[selection.provider]) {
+    throw new Error(
+      `Provider "${selection.provider}" is not active in this session. Add a model from it with arc models pool add, then restart.`,
+    );
+  }
+  router.setPin(selection);
+  return selection;
+}
+
+function resolveMainSelection(
+  config: ReturnType<typeof loadConfig>,
+  router: ModelRouter,
+): { provider: string; model: string } {
+  try {
+    return router.resolve("main");
+  } catch {
+    return config.models.roles.main;
+  }
 }
 
 main().catch((error: unknown) => {

@@ -16,6 +16,7 @@ import { buildContextMessages } from "./services/context-builder.js";
 import { ExecuteToolUseCase } from "./usecases/execute-tool.usecase.js";
 import { RunAgentTurnUseCase } from "./usecases/run-agent-turn.usecase.js";
 import { ToolRegistry } from "./services/tool-registry.js";
+import type { ModelRouter } from "./services/model-router.js";
 
 class ScriptedLlm implements LLMPort {
   readonly requests: LlmRequest[] = [];
@@ -179,6 +180,97 @@ describe("RunAgentTurnUseCase", () => {
           entry.role === "tool" && entry.content.includes("Duplicate"),
       )?.content ?? "",
       /Duplicate call blocked/,
+    );
+  });
+
+  it("blocks a repeated call even after a different call", async () => {
+    const { session, tool, run, profile } = createHarness([
+      toolDecision(1),
+      toolDecision(2),
+      toolDecision(1),
+      AgentDecision.finish("done", "Recovered."),
+    ]);
+
+    const answer = await run.execute({
+      session,
+      profile,
+      prompt: "try again",
+    });
+
+    assert.equal(answer, "Recovered.");
+    assert.equal(tool.executions, 2);
+    assert.match(
+      session.messages.find(
+        (entry) =>
+          entry.role === "tool" && entry.content.includes("Duplicate"),
+      )?.content ?? "",
+      /Duplicate call blocked/,
+    );
+  });
+
+  it("fails fast when the model keeps repeating the same call", async () => {
+    const { session, tool, run, profile } = createHarness(
+      [toolDecision(1), toolDecision(1), toolDecision(1), toolDecision(1)],
+      6,
+    );
+
+    await assert.rejects(
+      run.execute({ session, profile, prompt: "loop forever" }),
+      /repeated the same/,
+    );
+    assert.equal(tool.executions, 1);
+    assert.equal(session.status, "failed");
+  });
+
+  it("falls back to the next orchestrated model when the primary fails", async () => {
+    const session = AgentSession.create("fallback-session");
+    const tool = new EchoTool();
+    const registry = new ToolRegistry();
+    registry.register(tool);
+    const requests: LlmRequest[] = [];
+    const llm: LLMPort = {
+      async generateDecision(request: LlmRequest): Promise<LlmDecisionResult> {
+        requests.push(request);
+        if (request.provider === "ollama") {
+          throw new Error("local runtime unavailable");
+        }
+        return {
+          decision: AgentDecision.finish("done", "Cloud answered."),
+          usage: { promptTokens: 1, completionTokens: 1, totalDurationMs: 1 },
+        };
+      },
+    };
+    const modelRouter = {
+      planForProfile: () => ({
+        primary: { provider: "ollama", model: "qwen3:8b" },
+        fallbacks: [{ provider: "google", model: "gemini-3.6-flash" }],
+        reason: "test",
+        local: true,
+      }),
+    } as unknown as ModelRouter;
+    const run = new RunAgentTurnUseCase(
+      llm,
+      registry,
+      new ExecuteToolUseCase(registry),
+      {
+        maxSteps: 1,
+        maxObservationChars: 1_000,
+        maxSubAgentsPerTurn: 0,
+        assembler: createAssembler(registry),
+        modelRouter,
+      },
+    );
+
+    const answer = await run.execute({
+      session,
+      profile: assistantProfile(1),
+      prompt: "use the fallback",
+    });
+
+    assert.equal(answer, "Cloud answered.");
+    assert.deepEqual(
+      requests.map((request) => `${request.provider}/${request.model}`),
+      ["ollama/qwen3:8b", "google/gemini-3.6-flash"],
     );
   });
 

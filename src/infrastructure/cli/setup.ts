@@ -3,8 +3,10 @@ import type { AppConfig } from "../config/env.js";
 import {
   PROVIDER_PRESETS,
   formatModelRef,
+  isLocalProvider,
   parseModelRef,
   presetProvider,
+  type ModelMode,
   type ModelSelection,
   type ModelSettings,
   type ProviderPreset,
@@ -12,7 +14,9 @@ import {
 import type { SecretStorePort } from "../../domain/ports/secret-store.port.js";
 import { errorMessage } from "../../shared/text.js";
 import { detectDeviceProfile, formatBytes } from "../models/device-profile.js";
+import { estimateLocalModelFit } from "../models/model-fit.js";
 import { listProviderModels } from "../models/model-discovery.js";
+import { withDiscoveredLocalModels } from "../models/model-runtime.js";
 import {
   ensureProvider,
   providerFromId,
@@ -29,6 +33,7 @@ export interface SetupIO {
 }
 
 export interface SetupOptions {
+  mode?: ModelMode;
   provider?: string;
   main?: string;
   coding?: string;
@@ -80,6 +85,9 @@ export async function runSetupCommand(
   const readSecret = io.readSecret ?? readSecretFromInput;
 
   try {
+    const mode =
+      options.mode ??
+      (interactive ? await chooseMode(output, ask) : "hybrid");
     const providerId =
       options.provider ??
       (await chooseProvider(output, ask, secretStore, config));
@@ -89,6 +97,16 @@ export async function runSetupCommand(
         providerId,
         providerId === "ollama" ? config.ollama.baseUrl : undefined,
       );
+    if (mode === "cloud" && isLocalProvider(provider)) {
+      throw new Error(
+        "Cloud mode requires a cloud provider. Choose a cloud provider or use hybrid/local mode.",
+      );
+    }
+    if (mode === "local" && !isLocalProvider(provider)) {
+      throw new Error(
+        "Local mode requires a local provider. Choose Ollama, Colibrì, or another loopback OpenAI-compatible endpoint.",
+      );
+    }
 
     let apiKey: string | null = null;
     if (provider.apiKeyAccount) {
@@ -164,6 +182,7 @@ export async function runSetupCommand(
         : mainModel);
 
     let settings: ModelSettings = ensureProvider(config.models, provider);
+    settings = { ...settings, mode };
     settings = setRole(settings, "main", {
       provider: providerId,
       model: mainModel,
@@ -184,6 +203,9 @@ export async function runSetupCommand(
       provider: providerId,
       model: triageModel,
     });
+    if (mode !== "cloud") {
+      settings = await addInstalledLocalModels(settings, config);
+    }
 
     const fallback = options.fallback
       ? parseModelRef(options.fallback)
@@ -200,11 +222,13 @@ export async function runSetupCommand(
       [
         "",
         "Saved model routing.",
+        `  mode:     ${settings.mode}`,
         `  main:     ${formatModelRef(settings.roles.main)}`,
         `  research: ${formatModelRef(settings.roles.research)}`,
         `  coding:   ${formatModelRef(settings.roles.coding)}`,
         `  triage:   ${formatModelRef(settings.roles.triage)}`,
         `  compact:  ${formatModelRef(settings.roles.compaction)}`,
+        `  pool:     ${settings.pool.length > 0 ? settings.pool.map(formatModelRef).join(", ") : "(none)"}`,
         ...(settings.fallback.length > 0
           ? [`  fallback: ${settings.fallback.map(formatModelRef).join(", ")}`]
           : []),
@@ -262,6 +286,56 @@ export async function runModelsCommand(
     return 0;
   }
 
+  if (command === "pool") {
+    const [action, reference] = rest;
+    if (!action || action === "list") {
+      const pool = config.models.pool;
+      output(
+        pool.length > 0
+          ? `Model pool:\n${pool.map((selection) => `  ${formatModelRef(selection)}`).join("\n")}\n`
+          : "Model pool is empty. Add models with: arc models pool add <provider>/<model>\n",
+      );
+      return 0;
+    }
+    if (action !== "add" && action !== "remove") {
+      output("Usage: arc models pool [list|add|remove] <provider>/<model>\n");
+      return 1;
+    }
+    if (!reference) {
+      output(`Usage: arc models pool ${action} <provider>/<model>\n`);
+      return 1;
+    }
+    const selection = parseModelRef(reference);
+    const provider =
+      presetProvider(selection.provider) ??
+      config.models.providers[selection.provider];
+    if (!provider) {
+      output(
+        `Unknown provider "${selection.provider}". Run arc setup or add a custom provider first.\n`,
+      );
+      return 1;
+    }
+    const key = formatModelRef(selection);
+    const existing = config.models.pool.filter(
+      (item) => formatModelRef(item) !== key,
+    );
+    const pool =
+      action === "add"
+        ? [...existing, selection]
+        : existing;
+    const settings = {
+      ...ensureProvider(config.models, provider),
+      pool,
+    };
+    const filePath = await saveModelSettings(config.arcHome, settings);
+    output(
+      action === "add"
+        ? `Added ${key} to the model pool (${filePath}).\n`
+        : `Removed ${key} from the model pool (${filePath}).\n`,
+    );
+    return 0;
+  }
+
   if (command === "fallback") {
     const references = rest;
     if (references.length === 0) {
@@ -290,9 +364,75 @@ export async function runModelsCommand(
   }
 
   output(
-    "Usage:\n  arc models\n  arc models set <role> <provider>/<model>\n  arc models fallback <provider>/<model> [...]\n",
+    "Usage:\n  arc models\n  arc models set <role> <provider>/<model>\n  arc models pool [list|add|remove] <provider>/<model>\n  arc models fallback <provider>/<model> [...]\n",
   );
   return 1;
+}
+
+export async function runModeCommand(
+  config: AppConfig,
+  args: readonly string[] = [],
+  output: (text: string) => void = (text) => process.stdout.write(text),
+): Promise<number> {
+  const requested = args[0]?.trim().toLowerCase();
+  if (!requested) {
+    output(
+      [
+        "",
+        "ARC model mode",
+        "",
+        `  mode:     ${config.models.mode}`,
+        `  strategy: ${config.models.strategy}`,
+        `  privacy:  ${config.models.privacy.sensitiveData}`,
+        "",
+        "Modes:",
+        "  local   — only local providers; no data leaves the machine",
+        "  hybrid  — local and cloud; the orchestrator chooses per task",
+        "  cloud   — only cloud providers",
+        "",
+        "Change with: arc mode <local|hybrid|cloud>",
+        "",
+      ].join("\n"),
+    );
+    return 0;
+  }
+  if (requested !== "local" && requested !== "hybrid" && requested !== "cloud") {
+    output("Usage: arc mode [local|hybrid|cloud]\n");
+    return 1;
+  }
+  const effective = await withDiscoveredLocalModels(config);
+  const selections = [
+    ...Object.values(effective.models.roles),
+    ...effective.models.pool,
+  ];
+  const hasLocal = selections.some((selection) => {
+    const provider =
+      effective.models.providers[selection.provider] ??
+      presetProvider(selection.provider);
+    return provider ? isLocalProvider(provider) : false;
+  });
+  const hasCloud = selections.some((selection) => {
+    const provider =
+      effective.models.providers[selection.provider] ??
+      presetProvider(selection.provider);
+    return provider ? !isLocalProvider(provider) : false;
+  });
+  if (requested === "local" && !hasLocal) {
+    output(
+      "No local model is configured. Start Ollama or Colibrì, then run arc setup or arc models pool add.\n",
+    );
+    return 1;
+  }
+  if (requested === "cloud" && !hasCloud) {
+    output(
+      "No cloud model is configured. Run arc setup with a cloud provider first.\n",
+    );
+    return 1;
+  }
+  const settings: ModelSettings = { ...config.models, mode: requested };
+  const filePath = await saveModelSettings(config.arcHome, settings);
+  output(`Model mode set to ${requested}. Saved ${filePath}.\n`);
+  return 0;
 }
 
 export async function runProvidersCommand(
@@ -392,8 +532,12 @@ async function printModels(
   secretStore: SecretStorePort,
   output: (text: string) => void,
 ): Promise<void> {
+  const effective = await withDiscoveredLocalModels(config);
+  const settings = effective.models;
   const profile = await detectDeviceProfile(config.workspaceDir);
   output("\nARC model routing\n\n");
+  output(`Mode: ${settings.mode} (${settings.strategy})\n`);
+  output(`Privacy: sensitive data ${settings.privacy.sensitiveData === "local" ? "stays local" : "may use cloud"}\n`);
   output(`Device tier: ${profile.tier} — ${profile.recommendation}\n`);
   output(`Config: ${config.modelSettingsPath}\n\n`);
   for (const role of [
@@ -403,16 +547,30 @@ async function printModels(
     "triage",
     "compaction",
   ] as const) {
-    output(`  ${role.padEnd(11)} ${formatModelRef(config.models.roles[role])}\n`);
+    const selection = settings.roles[role];
+    const provider = settings.providers[selection.provider];
+    const fit = provider && isLocalProvider(provider)
+      ? estimateLocalModelFit(profile, selection.model)
+      : undefined;
+    output(
+      `  ${role.padEnd(11)} ${formatModelRef(selection)}${fit ? ` — ${fit.fits ? "fits" : "tight"} (${formatBytes(fit.requirements.totalBytes)} est.)` : ""}\n`,
+    );
   }
   output(
+    `  ${"pool".padEnd(11)} ${
+      settings.pool.length > 0
+        ? settings.pool.map(formatModelRef).join(", ")
+        : "(none)"
+    }\n`,
+  );
+  output(
     `  ${"fallback".padEnd(11)} ${
-      config.models.fallback.length > 0
-        ? config.models.fallback.map(formatModelRef).join(", ")
+      settings.fallback.length > 0
+        ? settings.fallback.map(formatModelRef).join(", ")
         : "(none)"
     }\n\n`,
   );
-  for (const [id, provider] of Object.entries(config.models.providers)) {
+  for (const [id, provider] of Object.entries(settings.providers)) {
     let status = "no key required";
     if (provider.apiKeyAccount) {
       try {
@@ -426,6 +584,70 @@ async function printModels(
     output(`  ${id}: ${provider.kind} at ${provider.baseUrl} — ${status}\n`);
   }
   output("\nChange a role with: arc models set <role> <provider>/<model>\n\n");
+}
+
+async function addInstalledLocalModels(
+  settings: ModelSettings,
+  config: AppConfig,
+): Promise<ModelSettings> {
+  let next = settings;
+  for (const preset of PROVIDER_PRESETS) {
+    if (preset.kind !== "ollama" && preset.id !== "colibri") {
+      continue;
+    }
+    const provider =
+      config.models.providers[preset.id] ??
+      presetProvider(preset.id, preset.id === "ollama"
+        ? { baseUrl: config.ollama.baseUrl }
+        : {});
+    if (!provider) {
+      continue;
+    }
+    try {
+      const discovered = await listProviderModels(provider, null);
+      if (discovered.length === 0) {
+        continue;
+      }
+      next = ensureProvider(next, provider);
+      const existing = new Map(
+        next.pool.map((selection) => [formatModelRef(selection), selection]),
+      );
+      for (const model of discovered) {
+        const selection = { provider: provider.id, model: model.id };
+        existing.set(formatModelRef(selection), selection);
+      }
+      next = { ...next, pool: [...existing.values()] };
+    } catch {
+      // A local runtime that is not running is optional, not a setup failure.
+    }
+  }
+  return next;
+}
+
+async function chooseMode(
+  output: (text: string) => void,
+  ask: (question: string) => Promise<string>,
+): Promise<ModelMode> {
+  output(
+    [
+      "Choose how ARC should use models:",
+      "  1. hybrid — local and cloud; ARC picks the best model per task (recommended)",
+      "  2. local  — only local providers; no data leaves the machine",
+      "  3. cloud  — only cloud providers",
+      "",
+    ].join("\n"),
+  );
+  const answer = (await ask("Mode [1]: ")).trim().toLowerCase() || "1";
+  if (answer === "1" || answer === "hybrid") {
+    return "hybrid";
+  }
+  if (answer === "2" || answer === "local") {
+    return "local";
+  }
+  if (answer === "3" || answer === "cloud") {
+    return "cloud";
+  }
+  throw new Error(`Unknown mode "${answer}".`);
 }
 
 async function chooseProvider(
@@ -550,7 +772,13 @@ function parseSetupOptions(args: readonly string[]): SetupOptions {
     if (!arg || !next) {
       continue;
     }
-    if (arg === "--provider") {
+    if (arg === "--mode") {
+      if (next !== "local" && next !== "hybrid" && next !== "cloud") {
+        throw new Error(`Unknown mode "${next}". Use local, hybrid, or cloud.`);
+      }
+      options.mode = next;
+      index += 1;
+    } else if (arg === "--provider") {
       options.provider = next;
       index += 1;
     } else if (arg === "--main") {

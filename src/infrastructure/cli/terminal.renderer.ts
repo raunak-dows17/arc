@@ -444,7 +444,8 @@ export class TerminalRenderer {
       ["/compact", "Summarize older history now"],
       ["/cancel", "Cancel the running turn (Ctrl+C also works)"],
       ["/sandbox [path]", "Show the workspace and a directory listing"],
-      ["/model", "Show the configured Ollama model"],
+      ["/model", "Show or pin the active model for this session"],
+      ["/mode", "Show the local/hybrid/cloud model boundary"],
       ["/exit", "Quit the CLI (Ctrl+D also works)"],
     ];
     for (const [command, description] of commands) {

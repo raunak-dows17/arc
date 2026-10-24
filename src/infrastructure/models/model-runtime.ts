@@ -1,5 +1,6 @@
 import type { AppConfig } from "../config/env.js";
 import {
+  isLocalProvider,
   presetProvider,
   type ModelSelection,
   type ModelSettings,
@@ -19,6 +20,8 @@ import {
 import { LlmDecisionModelAdapter } from "../llm/llm-decision.adapter.js";
 import { SerializedLlmAdapter } from "../llm/serialized-llm.adapter.js";
 import type { DecisionModelPort } from "../../domain/ports/decision-model.port.js";
+import type { ProviderHealthRegistry } from "./provider-health.js";
+import { listProviderModels } from "./model-discovery.js";
 
 export interface ModelRuntime {
   llm: SerializedLlmAdapter;
@@ -28,14 +31,93 @@ export interface ModelRuntime {
   settings: ModelSettings;
 }
 
+export interface CreateModelRuntimeOptions {
+  health?: ProviderHealthRegistry;
+}
+
 /**
- * Creates provider adapters only for the providers actually selected by the
- * routing table or fallback chain. A missing key is a startup error with an
- * actionable command, not a silent switch to a local model.
+ * Adds installed local models to the candidate pool at startup. The pool is
+ * kept in memory: model discovery is a cache, not a configuration write. This
+ * is what makes hybrid mode useful without requiring users to enumerate every
+ * local model manually.
+ */
+export async function withDiscoveredLocalModels(
+  config: AppConfig,
+): Promise<AppConfig> {
+  if (config.models.mode === "cloud") {
+    return config;
+  }
+  const settings = config.models;
+  const localIds = new Set<string>();
+  for (const [id, provider] of Object.entries(settings.providers)) {
+    if (isLocalProvider(provider)) {
+      localIds.add(id);
+    }
+  }
+  // Ollama is the default local runtime even when it has no role yet.
+  localIds.add("ollama");
+
+  const providers = { ...settings.providers };
+  const pool = new Map(
+    settings.pool.map((selection) => [formatSelection(selection), selection]),
+  );
+  let changed = false;
+  for (const id of localIds) {
+    let provider: ProviderSettings;
+    try {
+      provider = resolveProvider(id, config);
+    } catch {
+      continue;
+    }
+    if (!isLocalProvider(provider)) {
+      continue;
+    }
+    try {
+      const discovered = await listProviderModels(
+        provider,
+        null,
+        AbortSignal.timeout(1_500),
+      );
+      if (discovered.length === 0) {
+        continue;
+      }
+      providers[id] = provider;
+      for (const model of discovered) {
+        const selection = { provider: id, model: model.id };
+        pool.set(formatSelection(selection), selection);
+      }
+      changed = true;
+    } catch {
+      // A local runtime that is not running is optional.
+    }
+  }
+
+  if (!changed && Object.keys(providers).length === Object.keys(settings.providers).length) {
+    return config;
+  }
+  return {
+    ...config,
+    models: {
+      ...settings,
+      providers,
+      pool: [...pool.values()],
+    },
+  };
+}
+
+function formatSelection(selection: ModelSelection): string {
+  return `${selection.provider}/${selection.model}`;
+}
+
+/**
+ * Creates provider adapters for the providers selected by the routing table,
+ * pool, or fallback chain. Optional providers without keys are marked
+ * unavailable so the orchestrator can route around them.
  */
 export async function createModelRuntime(
   config: AppConfig,
   secretStore: SecretStorePort,
+  options: CreateModelRuntimeOptions = {},
 ): Promise<ModelRuntime> {
   const settings = config.models;
   const used = usedProviders(settings);
@@ -53,11 +135,17 @@ export async function createModelRuntime(
 
     const account =
       provider.apiKeyAccount || `provider.${provider.id}.api-key`;
-    const apiKey = await secretStore.get(account);
+    const local = isLocalProvider(provider);
+    const apiKey = local ? "local" : await secretStore.get(account);
     if (!apiKey) {
-      throw new LlmError(
+      // A missing key for an optional provider must not prevent ARC from
+      // starting with the other models in the pool.
+      options.health?.markUnavailable(
+        id,
+        "*",
         `Provider "${id}" needs an API key. Run: arc secrets set ${account}`,
       );
+      continue;
     }
 
     if (provider.kind === "google") {
@@ -78,17 +166,39 @@ export async function createModelRuntime(
     }
   }
 
-  const routing = new RoutingLlmAdapter(providers, settings.roles.main);
-  const resilient = new FallbackLlmAdapter(routing, settings.fallback);
-  const triage = settings.roles.triage;
+  const mainSelection = providers[settings.roles.main.provider]
+    ? settings.roles.main
+    : firstAvailableSelection(settings, providers);
+  if (!mainSelection) {
+    throw new LlmError(
+      "No model providers are available. Run \"arc doctor\" or \"arc setup\".",
+    );
+  }
+
+  const routing = new RoutingLlmAdapter(
+    providers,
+    mainSelection,
+    options.health,
+  );
+  const resilient = new FallbackLlmAdapter(
+    routing,
+    settings.fallback,
+    options.health,
+  );
+  const triage = providers[settings.roles.triage.provider]
+    ? settings.roles.triage
+    : mainSelection;
+  const triageProvider = resolveProvider(triage.provider, config);
   const decisionModel =
-    triage.provider === "ollama" &&
-    providers[triage.provider] instanceof OllamaLlmAdapter
+    triageProvider.systemOne === true ||
+    (triage.provider === "ollama" &&
+      providers[triage.provider] instanceof OllamaLlmAdapter)
       ? new OllamaDecisionAdapter({
           baseUrl:
+            triage.provider === "ollama" &&
             config.ollama.decisionBaseUrl !== config.ollama.baseUrl
               ? config.ollama.decisionBaseUrl
-              : resolveProvider(triage.provider, config).baseUrl,
+              : triageProvider.baseUrl,
           model: triage.model,
           keepAlive: config.ollama.keepAlive,
           timeoutMs: config.ollama.timeoutMs,
@@ -107,6 +217,7 @@ export async function createModelRuntime(
 export async function checkSelectedOllamaModels(
   config: AppConfig,
   runtime: ModelRuntime,
+  healthRegistry?: ProviderHealthRegistry,
 ): Promise<string[]> {
   const warnings: string[] = [];
   for (const [id, provider] of Object.entries(runtime.providers)) {
@@ -114,19 +225,33 @@ export async function checkSelectedOllamaModels(
       continue;
     }
     const settings = resolveProvider(id, config);
-    const roles = Object.values(config.models.roles)
-      .filter((selection) => selection.provider === id)
-      .map((selection) => selection.model);
+    const selections = [
+      ...Object.values(config.models.roles),
+      ...config.models.pool,
+    ].filter((selection) => selection.provider === id);
+    const models = [...new Set(selections.map((selection) => selection.model))];
     let health;
     try {
-      health = await provider.checkHealth([...new Set(roles)]);
+      health = await provider.checkHealth(models);
     } catch (error) {
+      healthRegistry?.markUnavailable(
+        id,
+        "*",
+        error instanceof Error ? error.message : String(error),
+      );
       warnings.push(
         `Ollama provider "${id}" is not reachable: ${error instanceof Error ? error.message : String(error)}`,
       );
       continue;
     }
     warnings.push(...health.warnings);
+    for (const missing of health.missingModels) {
+      healthRegistry?.markUnavailable(
+        id,
+        missing,
+        `Model "${missing}" is not installed. Run: ollama pull ${missing}`,
+      );
+    }
     if (
       health.missingModels.includes(config.models.roles.main.model) &&
       config.models.roles.main.provider === id
@@ -175,10 +300,29 @@ function usedProviders(settings: ModelSettings): string[] {
   for (const selection of Object.values(settings.roles)) {
     ids.add(selection.provider);
   }
+  for (const selection of settings.pool) {
+    ids.add(selection.provider);
+  }
   for (const selection of settings.fallback) {
     ids.add(selection.provider);
   }
   return [...ids];
+}
+
+function firstAvailableSelection(
+  settings: ModelSettings,
+  providers: Readonly<Record<string, ProviderLlm>>,
+): ModelSelection | null {
+  for (const selection of [
+    ...Object.values(settings.roles),
+    ...settings.pool,
+    ...settings.fallback,
+  ]) {
+    if (providers[selection.provider]) {
+      return selection;
+    }
+  }
+  return null;
 }
 
 export function selectionLabel(selection: ModelSelection): string {

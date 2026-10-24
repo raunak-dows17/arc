@@ -4,6 +4,12 @@ import { z } from "zod";
 
 export type ProviderKind = "ollama" | "google" | "openai-compatible";
 
+/** The user's hard boundary for model selection. */
+export type ModelMode = "local" | "hybrid" | "cloud";
+
+/** How aggressively the orchestrator trades quality for cost and latency. */
+export type ModelStrategy = "quality" | "balanced" | "cost";
+
 export interface ModelSelection {
   provider: string;
   model: string;
@@ -17,6 +23,8 @@ export interface ProviderSettings {
   apiKeyAccount: string;
   /** Whether the provider reliably supports a JSON response mode. */
   jsonMode: boolean;
+  /** Whether the provider exposes a /v1/systemone decision endpoint. */
+  systemOne?: boolean;
 }
 
 export interface ModelRoleSettings {
@@ -27,10 +35,22 @@ export interface ModelRoleSettings {
   compaction: ModelSelection;
 }
 
+export interface ModelPrivacySettings {
+  /** Keep sensitive task content on local models unless explicitly allowed. */
+  sensitiveData: "local" | "allow-cloud";
+}
+
 export interface ModelSettings {
   version: 1;
+  /** Hard boundary chosen by the user. Defaults to hybrid. */
+  mode: ModelMode;
+  /** Quality/cost trade-off used inside the selected mode. */
+  strategy: ModelStrategy;
+  privacy: ModelPrivacySettings;
   providers: Record<string, ProviderSettings>;
   roles: ModelRoleSettings;
+  /** Additional models the orchestrator may choose from. */
+  pool: ModelSelection[];
   fallback: ModelSelection[];
 }
 
@@ -43,6 +63,7 @@ export interface ProviderPreset {
   docsUrl: string;
   freeTier: boolean;
   jsonMode: boolean;
+  systemOne?: boolean;
   description: string;
   suggestedModels: {
     main: string;
@@ -171,6 +192,24 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
       triage: "tev1:0.8b",
     },
   },
+  {
+    id: "colibri",
+    name: "Colibrì (local)",
+    kind: "openai-compatible",
+    baseUrl: "http://127.0.0.1:8000/v1",
+    apiKeyAccount: "",
+    docsUrl: "https://github.com/JustVugg/colibri",
+    freeTier: true,
+    jsonMode: true,
+    systemOne: true,
+    description:
+      "Local disk-streaming MoE runtime with an OpenAI-compatible chat API and a System One decision endpoint.",
+    suggestedModels: {
+      main: "qwen3-coder-30b-a3b",
+      coding: "qwen3-coder-30b-a3b",
+      triage: "laya",
+    },
+  },
 ];
 
 const selectionSchema = z.object({
@@ -184,10 +223,18 @@ const providerSchema = z.object({
   baseUrl: z.string().trim().url(),
   apiKeyAccount: z.string().trim().default(""),
   jsonMode: z.boolean().default(true),
+  systemOne: z.boolean().default(false),
 });
 
 const settingsSchema = z.object({
   version: z.literal(1),
+  mode: z.enum(["local", "hybrid", "cloud"]).default("hybrid"),
+  strategy: z.enum(["quality", "balanced", "cost"]).default("balanced"),
+  privacy: z
+    .object({
+      sensitiveData: z.enum(["local", "allow-cloud"]).default("local"),
+    })
+    .default({ sensitiveData: "local" }),
   providers: z.record(z.string(), providerSchema),
   roles: z.object({
     main: selectionSchema,
@@ -196,6 +243,7 @@ const settingsSchema = z.object({
     triage: selectionSchema,
     compaction: selectionSchema,
   }),
+  pool: z.array(selectionSchema).default([]),
   fallback: z.array(selectionSchema).default([]),
 });
 
@@ -213,6 +261,7 @@ export function presetProvider(
     baseUrl: preset.baseUrl,
     apiKeyAccount: preset.apiKeyAccount,
     jsonMode: preset.jsonMode,
+    ...(preset.systemOne ? { systemOne: true } : {}),
     ...overrides,
   };
 }
@@ -226,6 +275,9 @@ export function legacyModelSettings(input: {
 }): ModelSettings {
   return {
     version: 1,
+    mode: "hybrid",
+    strategy: "balanced",
+    privacy: { sensitiveData: "local" },
     providers: {
       ollama: {
         id: "ollama",
@@ -242,6 +294,7 @@ export function legacyModelSettings(input: {
       triage: { provider: "ollama", model: input.decision },
       compaction: { provider: "ollama", model: input.main },
     },
+    pool: [],
     fallback: [],
   };
 }
@@ -392,4 +445,21 @@ export function formatModelRef(selection: ModelSelection): string {
 
 export function modelSettingsPath(arcHome: string): string {
   return path.join(arcHome, "models.json");
+}
+
+/** Local providers are Ollama or any loopback OpenAI-compatible endpoint. */
+export function isLocalProvider(provider: ProviderSettings): boolean {
+  if (provider.kind === "ollama") {
+    return true;
+  }
+  try {
+    const url = new URL(provider.baseUrl);
+    return (
+      url.hostname === "localhost" ||
+      url.hostname === "127.0.0.1" ||
+      url.hostname === "::1"
+    );
+  } catch {
+    return false;
+  }
 }

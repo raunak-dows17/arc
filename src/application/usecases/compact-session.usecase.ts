@@ -93,7 +93,9 @@ export class CompactSessionUseCase {
     signal?.throwIfAborted();
 
     try {
-      const selection = this.options.modelRouter?.resolve("compaction");
+      const selection = this.options.modelRouter?.plan("compaction", {
+        contextChars: prompt.length,
+      }).primary;
       const result = await this.llm.generateText(prompt, {
         systemPrompt:
           "You compress conversation history. Return only the summary text.",

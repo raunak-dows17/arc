@@ -1,5 +1,8 @@
 import { z } from "zod";
-import type { ProviderSettings } from "../config/models.js";
+import {
+  isLocalProvider,
+  type ProviderSettings,
+} from "../config/models.js";
 import { GoogleGeminiAdapter } from "../llm/google-gemini.adapter.js";
 import { OpenAiCompatibleAdapter } from "../llm/openai-compatible.adapter.js";
 
@@ -39,7 +42,7 @@ export async function listProviderModels(
     return parsed.data.models.map((model) => ({ id: model.name }));
   }
 
-  if (!apiKey) {
+  if (!apiKey && !isLocalProvider(provider)) {
     throw new Error(
       `Provider "${provider.id}" needs an API key before its models can be listed.`,
     );
@@ -49,7 +52,7 @@ export async function listProviderModels(
     const adapter = new GoogleGeminiAdapter({
       providerId: provider.id,
       baseUrl: provider.baseUrl,
-      apiKey,
+      apiKey: apiKey ?? "local",
     });
     return adapter.listModels(signal);
   }
@@ -57,7 +60,7 @@ export async function listProviderModels(
   const adapter = new OpenAiCompatibleAdapter({
     providerId: provider.id,
     baseUrl: provider.baseUrl,
-    apiKey,
+    apiKey: apiKey ?? "local",
     jsonMode: provider.jsonMode,
   });
   return adapter.listModels(signal);

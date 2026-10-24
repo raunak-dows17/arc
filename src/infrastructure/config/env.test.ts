@@ -74,6 +74,17 @@ describe("loadConfig", () => {
     assert.equal(legacy.ollama.numCtx, 2048);
   });
 
+  it("accepts an ARC_MODEL_MODE override", () => {
+    const config = loadConfig({
+      ARC_HOME: "./.arc",
+      ARC_WORKSPACE: "./workspace",
+      ARC_MODEL_MODE: "local",
+    } as NodeJS.ProcessEnv);
+
+    assert.equal(config.models.mode, "local");
+    assert.equal(config.models.privacy.sensitiveData, "local");
+  });
+
   it("rejects an ARC_HOME inside the workspace", () => {
     assert.throws(
       () =>

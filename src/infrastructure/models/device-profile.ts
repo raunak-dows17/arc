@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { statfs } from "node:fs/promises";
+import { readFile, statfs } from "node:fs/promises";
 import os from "node:os";
 import { promisify } from "node:util";
 
@@ -22,6 +22,9 @@ export interface DeviceProfile {
   gpu: {
     name: string;
     vramBytes?: number;
+    /** Apple Silicon and other integrated GPUs share the system memory pool. */
+    unifiedMemory?: boolean;
+    backend?: "metal" | "cuda" | "vulkan" | "cpu";
   } | null;
   tier: DeviceTier;
   recommendation: string;
@@ -45,16 +48,23 @@ export async function detectDeviceProfile(
   const platform = options.platform ?? process.platform;
   const cpus = options.cpus ?? os.cpus();
   const totalMemory = options.totalMemory ?? os.totalmem();
-  const freeMemory = options.freeMemory ?? os.freemem();
+  const freeMemory =
+    options.freeMemory !== undefined
+      ? options.freeMemory
+      : await availableMemoryBytes();
   const freeDiskBytes =
     options.freeDiskBytes !== undefined
       ? options.freeDiskBytes
       : await freeDisk(directory);
-  const gpu = options.gpu !== undefined ? options.gpu : await detectGpu();
+  const arch = options.arch ?? os.arch();
+  const gpu =
+    options.gpu !== undefined
+      ? options.gpu
+      : await detectGpu(platform, arch, totalMemory);
   const classification = classify(totalMemory, gpu);
   return {
     platform,
-    arch: options.arch ?? os.arch(),
+    arch,
     cpuModel: cpus[0]?.model.trim() || "unknown CPU",
     cpuCores: cpus.length,
     totalMemoryBytes: totalMemory,
@@ -72,46 +82,115 @@ export function formatBytes(value: number | null): string {
   return `${(value / 1024 ** 3).toFixed(1)} GB`;
 }
 
+/**
+ * Returns reclaimable memory rather than strictly free pages. macOS uses
+ * vm_stat (free + inactive + speculative + purgeable); Linux uses MemAvailable
+ * from /proc/meminfo. Other platforms fall back to os.freemem().
+ */
+export async function availableMemoryBytes(): Promise<number> {
+  if (process.platform === "darwin") {
+    try {
+      const { stdout } = await execFileAsync("vm_stat", [], {
+        timeout: 1_500,
+      });
+      return parseVmStatAvailableBytes(stdout) ?? os.freemem();
+    } catch {
+      return os.freemem();
+    }
+  }
+  if (process.platform === "linux") {
+    try {
+      const meminfo = await readFile("/proc/meminfo", "utf8");
+      return parseLinuxMemAvailableBytes(meminfo) ?? os.freemem();
+    } catch {
+      return os.freemem();
+    }
+  }
+  return os.freemem();
+}
+
+export function parseLinuxMemAvailableBytes(meminfo: string): number | null {
+  const match = meminfo.match(/^MemAvailable:\s+(\d+)\s+kB/m);
+  if (!match?.[1]) {
+    return null;
+  }
+  const kilobytes = Number.parseInt(match[1], 10);
+  return Number.isFinite(kilobytes) && kilobytes > 0
+    ? kilobytes * 1_024
+    : null;
+}
+
+export function parseVmStatAvailableBytes(stdout: string): number | null {
+  const pageSizeMatch = stdout.match(/page size of (\d+) bytes/);
+  const pageSize = pageSizeMatch?.[1]
+    ? Number.parseInt(pageSizeMatch[1], 10)
+    : 4_096;
+  if (!Number.isFinite(pageSize) || pageSize <= 0) {
+    return null;
+  }
+  const pages = [
+    "Pages free",
+    "Pages inactive",
+    "Pages speculative",
+    "Pages purgeable",
+  ]
+    .map((label) => {
+      const match = stdout.match(
+        new RegExp(`^${label}:\\s+(\\d+)\\.`, "m"),
+      );
+      return match?.[1] ? Number.parseInt(match[1], 10) : 0;
+    })
+    .reduce((sum, value) => sum + value, 0);
+  return pages > 0 ? pages * pageSize : null;
+}
+
 function classify(
   totalMemory: number,
   gpu: DeviceProfile["gpu"],
 ): Pick<DeviceProfile, "tier" | "recommendation" | "reasons"> {
   const memoryGb = totalMemory / 1024 ** 3;
+  const unified = gpu?.unifiedMemory === true;
   const vramGb = (gpu?.vramBytes ?? 0) / 1024 ** 3;
+  const effectiveGpuGb = unified ? memoryGb : vramGb;
+  const memoryLabel = unified
+    ? `${memoryGb.toFixed(1)} GB unified memory`
+    : `${memoryGb.toFixed(1)} GB RAM`;
+
   if (memoryGb < 8) {
     return {
       tier: "cloud-only",
       recommendation:
         "Use a cloud provider. Local generative models are likely to exhaust memory.",
-      reasons: [`${memoryGb.toFixed(1)} GB RAM is below the 8 GB local-model floor.`],
+      reasons: [`${memoryLabel} is below the 8 GB local-model floor.`],
     };
   }
-  if (memoryGb < 16 || vramGb < 4) {
+  if (memoryGb < 16 || (!unified && effectiveGpuGb < 4)) {
     return {
       tier: "cloud-preferred",
       recommendation:
         "Use a cloud provider for chat and coding. Keep only a tiny local model for optional triage.",
       reasons: [
-        `${memoryGb.toFixed(1)} GB RAM and ${vramGb > 0 ? `${vramGb.toFixed(1)} GB VRAM` : "no detected discrete GPU"} are a tight local-model budget.`,
+        `${memoryLabel} and ${effectiveGpuGb > 0 ? `${effectiveGpuGb.toFixed(1)} GB GPU memory` : "no detected GPU"} are a tight local-model budget.`,
       ],
     };
   }
-  if (memoryGb < 32 && vramGb < 8) {
+  if (memoryGb < 32 && effectiveGpuGb < 8 && !unified) {
     return {
       tier: "balanced",
       recommendation:
         "Cloud is the default. A 3B–7B local model may work for lightweight tasks when the machine is idle.",
       reasons: [
-        `${memoryGb.toFixed(1)} GB RAM can run a small model, but larger models may slow the system.`,
+        `${memoryLabel} can run a small model, but larger models may slow the system.`,
       ],
     };
   }
   return {
     tier: "local-capable",
-    recommendation:
-      "Cloud remains the default, but this machine can run a 7B–8B local model as an optional fallback.",
+    recommendation: unified
+      ? "This machine can run a 7B–8B local model. Use local models for triage and short tasks; keep cloud for long agent loops."
+      : "Cloud remains the default, but this machine can run a 7B–8B local model as an optional fallback.",
     reasons: [
-      `${memoryGb.toFixed(1)} GB RAM${vramGb > 0 ? ` and ${vramGb.toFixed(1)} GB VRAM` : ""} meet the local 7B–8B guideline.`,
+      `${memoryLabel}${unified ? " is shared with the GPU" : effectiveGpuGb > 0 ? ` and ${effectiveGpuGb.toFixed(1)} GB GPU memory` : ""} meet the local 7B–8B guideline.`,
     ],
   };
 }
@@ -125,7 +204,20 @@ async function freeDisk(directory: string): Promise<number | null> {
   }
 }
 
-async function detectGpu(): Promise<DeviceProfile["gpu"]> {
+async function detectGpu(
+  platform: NodeJS.Platform,
+  arch: string,
+  totalMemory: number,
+): Promise<DeviceProfile["gpu"]> {
+  if (platform === "darwin" && arch === "arm64") {
+    return {
+      name: "Apple Silicon GPU",
+      vramBytes: totalMemory,
+      unifiedMemory: true,
+      backend: "metal",
+    };
+  }
+
   try {
     const { stdout } = await execFileAsync(
       "nvidia-smi",
@@ -152,6 +244,8 @@ async function detectGpu(): Promise<DeviceProfile["gpu"]> {
       ...(Number.isFinite(megabytes) && megabytes > 0
         ? { vramBytes: megabytes * 1024 ** 2 }
         : {}),
+      unifiedMemory: false,
+      backend: "cuda",
     };
   } catch {
     return null;

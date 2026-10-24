@@ -1,17 +1,21 @@
 # ARC — Autonomous Regenerative Companion
 
 ARC is a free, provider-neutral companion agent for Windows, macOS, and Linux.
-It can use cloud models from Google Gemini, Groq, OpenRouter, Cerebras,
-Mistral, GitHub Models, or any OpenAI-compatible endpoint, and can optionally
-use local **Ollama** models. It keeps durable Markdown memory, loads skills on
+It can use local **Ollama** or **Colibrì** models, cloud models from Google
+Gemini, Groq, OpenRouter, Cerebras, Mistral, GitHub Models, or any
+OpenAI-compatible endpoint. It keeps durable Markdown memory, loads skills on
 demand, delegates bounded work to sequential sub-agents, and keeps explicit
 approval boundaries for anything that leaves the machine.
 
 - **Runs on Windows, macOS, and Linux.** Paths, credential storage, shell
   commands, and workspace boundaries are platform-aware.
-- **Cloud-first by default when a provider key exists.** Local Ollama is
-  optional. ARC does not automatically load a large local model on a
-  memory-constrained machine.
+- **Hybrid by default.** You choose a hard `local`, `hybrid`, or `cloud`
+  boundary. Inside that boundary ARC's deterministic orchestrator picks the
+  best model per task: local-first when quality is sufficient, with cloud
+  escalation for research or complex work.
+- **Host-health aware.** Local selection considers free RAM, unified/discrete
+  GPU memory, context size, prefill cost, installed models, and provider
+  cooldowns. ARC will not blindly load a model that does not fit.
 - **Read-only by default for the outside world.** Social analysis and email
   ingestion never post, reply, delete, or mark messages read. Email is
   read + notify only.
@@ -19,8 +23,9 @@ approval boundaries for anything that leaves the machine.
   possible. Provider limits and model ids change, so setup discovers the
   current model list.
 
-> **Current milestone: Phase 5 + provider layer.** Chat, memory, skills,
-> sub-agents, provider routing, Gemini and OpenAI-compatible adapters, device
+> **Current milestone: Phase 5 + model orchestration.** Chat, memory, skills,
+> sub-agents, provider routing, Gemini and OpenAI-compatible adapters, local
+> model discovery and fit estimates, deterministic model orchestration, device
 > detection, `arc setup`, read-only Gmail ingestion, Telegram remote chat, the
 > fail-closed approval boundary, OS credential storage, and cross-platform
 > workspace tools are in place.
@@ -29,16 +34,19 @@ approval boundaries for anything that leaves the machine.
 
 - Node.js 20 or newer
 - One of:
-  - an API key for a cloud provider (recommended), or
-  - [Ollama](https://ollama.com) with local models if you explicitly want
-    local inference
+  - an API key for a cloud provider, or
+  - [Ollama](https://ollama.com) with local models
+- Optional: a [Colibrì](https://github.com/JustVugg/colibri) local runtime
 - Optional: a Brave Search API key for `web_search`
 - Optional: a Gmail app password for read-only email notifications
 - Optional: a Telegram bot token for remote chat
 
-Local models are never required. If you do use Ollama on a 16 GB machine,
-`qwen3:8b` is a reasonable upper bound for generative work, and `tev1:0.8b` is
-a small pre-classifier rather than a chat or tool-call model.
+Local models are never required. On a 16 GB Apple Silicon machine,
+`qwen3:8b` is a reasonable upper bound for generative work,
+`qwen2.5-coder:7b` is useful for coding, and `tev1:0.8b` is a small
+pre-classifier rather than a chat or tool-call model. ARC discovers installed
+local models at startup and adds them to the in-memory candidate pool in
+`hybrid` or `local` mode.
 
 ## Quick start
 
@@ -52,9 +60,10 @@ arc doctor
 arc
 ```
 
-`arc setup` detects the device, lists providers, stores the provider key in the
-OS credential store, discovers available models, and writes non-secret routing
-choices to `ARC_HOME/models.json`.
+`arc setup` detects the device, asks for the `local`/`hybrid`/`cloud` boundary,
+lists providers, stores the provider key in the OS credential store, discovers
+available models, and writes non-secret routing choices to
+`ARC_HOME/models.json`. The default is `hybrid`.
 
 Provider keys are never stored in `.env`, source, logs, or `models.json`:
 
@@ -104,7 +113,8 @@ Inside the REPL:
 | `/tasks`, `/task <id>` | Inspect sub-agent runs |
 | `/compact` | Summarize older history now |
 | `/cancel` | Cancel the running turn |
-| `/model` | Show the configured main model |
+| `/model [provider/model]` | Show or pin the active model for this session (`/model auto` clears) |
+| `/mode` | Show the local/hybrid/cloud model boundary |
 
 Anything else is sent to ARC as a task.
 
@@ -113,9 +123,12 @@ Process commands:
 | Command | Purpose |
 | --- | --- |
 | `arc` | Start the interactive terminal REPL |
-| `arc setup` | Detect the device, add a provider key, and choose models |
-| `arc models` | Show provider/model routing and key status |
+| `arc --model <provider>/<model>` | Start with a session model pin inside the selected boundary |
+| `arc setup` | Detect the device, choose a model boundary, add a provider key, and choose models |
+| `arc mode [local\|hybrid\|cloud]` | Show or change the hard model boundary |
+| `arc models` | Show provider/model routing, discovered local models, and key status |
 | `arc models set <role> <provider>/<model>` | Change one routing role |
+| `arc models pool [list\|add\|remove] <provider>/<model>` | Manage the candidate pool |
 | `arc models fallback <provider>/<model> [...]` | Set a fallback chain |
 | `arc providers` | List provider presets and key status |
 | `arc providers add <id> <https-base-url>` | Add a custom OpenAI-compatible provider |
@@ -142,8 +155,30 @@ arguments, so they do not land in shell history.
 
 ## Models and routing
 
-`arc setup` writes `ARC_HOME/models.json` with a provider/model pair for each
-role:
+`arc setup` writes `ARC_HOME/models.json` with the selected boundary and a
+provider/model pair for each role.
+
+### Model boundary
+
+| Mode | Behaviour |
+| --- | --- |
+| `local` | Only local providers. No prompt or tool observation leaves the machine. |
+| `hybrid` | Local and cloud. The orchestrator uses local models when they meet the task quality floor and fit the host, then escalates to cloud when needed. |
+| `cloud` | Only cloud providers. Local models are ignored, even if installed. |
+
+Change the boundary without editing JSON:
+
+```bash
+arc mode hybrid
+arc mode local
+arc mode cloud
+```
+
+An explicit `/model` or `--model` pin wins inside the selected boundary. A pin
+that would cross the boundary, or send sensitive data to cloud when privacy is
+set to `local`, is ignored rather than silently violating the boundary.
+
+### Roles
 
 | Role | Purpose |
 | --- | --- |
@@ -154,9 +189,37 @@ role:
 | `compaction` | Summarizes old transcript history |
 
 Provider presets include Google Gemini, Groq, OpenRouter, Cerebras, Mistral,
-GitHub Models, and optional Ollama. Any other OpenAI-compatible endpoint can be
+GitHub Models, Ollama, and Colibrì. Any other OpenAI-compatible endpoint can be
 added with a base URL and key account. The setup wizard queries each provider’s
 model list, so it is not tied to a hardcoded catalog.
+
+### How selection works
+
+`ModelOrchestrator` is deterministic, not model-routed. For each task it:
+
+1. Applies the hard `local`/`hybrid`/`cloud` boundary.
+2. Keeps sensitive work local when `privacy.sensitiveData` is `local`.
+3. Filters models that lack tool calling, context window, installed status, or
+   a healthy provider.
+4. Estimates local weights, KV cache, overhead, prefill time, and decode speed
+   against current free memory.
+5. Applies a per-task quality floor, then prefers local models when they are
+   close enough to the best cloud option.
+6. Returns a primary model plus up to three fallbacks.
+
+Research and complex coding escalate to cloud when local quality is materially
+lower. Triage and compaction strongly prefer local. Provider `429`, auth,
+timeout, and server failures create short cooldowns so ARC does not hammer a
+free tier or a stopped local runtime.
+
+Installed local models are discovered at startup and added to an in-memory
+candidate pool. Add a model explicitly when discovery is not enough:
+
+```bash
+arc models pool add ollama/qwen3:8b
+arc models pool add colibri/qwen3-coder-30b-a3b
+arc models pool list
+```
 
 Fallbacks are optional but recommended:
 
@@ -176,8 +239,10 @@ OLLAMA_NUM_PARALLEL=1
 ```
 
 Tev1 remains supported as a local triage model through Ollama’s
-`/v1/systemone` endpoint. Cloud triage uses a provider-neutral JSON classifier
-and only sees sender, subject, timestamp, and a short snippet.
+`/v1/systemone` endpoint. Colibrì exposes the same endpoint for Laya and an
+OpenAI-compatible chat endpoint for its MoE models; configure it with the
+`colibri` preset. Cloud triage uses a provider-neutral JSON classifier and only
+sees sender, subject, timestamp, and a short snippet.
 
 ## Web and coding tools
 
@@ -349,6 +414,7 @@ Copy `.env.example` to `.env`. Canonical variables include:
 | `ARC_WORKSPACE` | `./sandbox` |
 | `ARC_PROFILE` | `arc` |
 | `ARC_MODEL_PROVIDER` | Provider id; overrides `models.json` for legacy/CI runs |
+| `ARC_MODEL_MODE` | `local`, `hybrid`, or `cloud`; overrides the stored boundary for this process |
 | `ARC_MODEL` | Main model id (legacy/Ollama when no `models.json`) |
 | `ARC_CODING_MODEL` | Coding model id (legacy/Ollama when no `models.json`) |
 | `ARC_RESEARCH_MODEL` | Research model id |

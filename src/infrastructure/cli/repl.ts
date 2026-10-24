@@ -33,6 +33,12 @@ export interface ChatReplDeps {
   runAgentTurn: RunAgentTurnUseCase;
   renderer: TerminalRenderer;
   modelName: string;
+  /** Model label to show after clearing a session pin. */
+  baseModelName?: string;
+  modelMode: string;
+  /** Pin a model for this session, returning the normalized selection. */
+  modelPin?: (reference: string) => { provider: string; model: string };
+  modelPinClear?: () => void;
   arcHome: string;
   defaultProfileId: string;
   profiles: AgentProfileRepositoryPort;
@@ -54,8 +60,10 @@ export class ChatRepl {
   private abortController: AbortController | null = null;
   private turnLineHandler: ((line: string) => void) | null = null;
   private closed = false;
+  private readonly baseModelName: string;
 
   constructor(private readonly deps: ChatReplDeps) {
+    this.baseModelName = deps.baseModelName ?? deps.modelName;
     this.deps.events.on("subagent.started", (event) => {
       this.deps.renderer.subAgentStarted({
         agentId: String(event.data.agentId ?? "agent"),
@@ -517,15 +525,46 @@ export class ChatRepl {
         }
         return false;
 
-      case "/model":
-        this.deps.renderer.info(
-          `Model: ${this.deps.modelName} (change with arc setup or arc models set)`,
-        );
-        if (argument) {
-          this.deps.renderer.warn(
-            "Changing models mid-session is not supported. Edit .env and restart.",
+      case "/model": {
+        const requested = argument.trim();
+        if (!requested) {
+          this.deps.renderer.info(
+            `Model: ${this.deps.modelName} in ${this.deps.modelMode} mode (pin with /model <provider>/<model>, clear with /model auto)`,
           );
+          return false;
         }
+        if (requested === "auto" || requested === "clear") {
+          if (!this.deps.modelPinClear) {
+            this.deps.renderer.warn("Session model pinning is not available.");
+            return false;
+          }
+          this.deps.modelPinClear();
+          this.deps.modelName = this.baseModelName;
+          this.deps.renderer.info(
+            "Model pin cleared. The orchestrator will choose the best model again.",
+          );
+          return false;
+        }
+        if (!this.deps.modelPin) {
+          this.deps.renderer.warn("Session model pinning is not available.");
+          return false;
+        }
+        try {
+          const selection = this.deps.modelPin(requested);
+          this.deps.modelName = `${selection.provider}/${selection.model} (pinned)`;
+          this.deps.renderer.info(
+            `Pinned ${selection.provider}/${selection.model} for this session. The ${this.deps.modelMode} boundary still applies.`,
+          );
+        } catch (error) {
+          this.deps.renderer.warn(errorMessage(error));
+        }
+        return false;
+      }
+
+      case "/mode":
+        this.deps.renderer.info(
+          `Model mode: ${this.deps.modelMode} (change with: arc mode <local|hybrid|cloud>; restart to apply)`,
+        );
         return false;
 
       case "/exit":

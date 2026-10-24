@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import {
   formatModelRef,
+  isLocalProvider,
   legacyModelSettings,
   loadModelSettings,
   parseModelRef,
@@ -44,6 +45,56 @@ describe("model settings", () => {
       provider: "ollama",
       model: "tev1:0.8b",
     });
+    assert.equal(settings.mode, "hybrid");
+    assert.equal(settings.strategy, "balanced");
+    assert.equal(settings.privacy.sensitiveData, "local");
+    assert.deepEqual(settings.pool, []);
+  });
+
+  it("persists the model mode and pool", async () => {
+    const home = path.join(directory, "mode");
+    const ollama = presetProvider("ollama");
+    assert.ok(ollama);
+    const saved = {
+      ...legacyModelSettings({
+        ollamaBaseUrl: "http://127.0.0.1:11434",
+        main: "qwen3:8b",
+        research: "qwen3:8b",
+        coding: "qwen2.5-coder:7b",
+        decision: "tev1:0.8b",
+      }),
+      mode: "local" as const,
+      pool: [{ provider: "ollama", model: "qwen3:8b" }],
+    };
+    await saveModelSettings(home, saved);
+
+    const loaded = loadModelSettings({
+      arcHome: home,
+      env: {},
+      legacy: {
+        ollamaBaseUrl: "http://127.0.0.1:11434",
+        main: "qwen3:8b",
+        research: "qwen3:8b",
+        coding: "qwen2.5-coder:7b",
+        decision: "tev1:0.8b",
+      },
+    });
+    assert.equal(loaded.mode, "local");
+    assert.deepEqual(loaded.pool, [{ provider: "ollama", model: "qwen3:8b" }]);
+  });
+
+  it("recognizes local providers and the Colibri preset", () => {
+    const ollama = presetProvider("ollama");
+    const colibri = presetProvider("colibri");
+    const google = presetProvider("google");
+    assert.ok(ollama);
+    assert.ok(colibri);
+    assert.ok(google);
+    assert.equal(isLocalProvider(ollama), true);
+    assert.equal(isLocalProvider(colibri), true);
+    assert.equal(isLocalProvider(google), false);
+    assert.equal(colibri.systemOne, true);
+    assert.equal(colibri.apiKeyAccount, "");
   });
 
   it("round-trips models.json and ignores legacy model env when the file exists", async () => {

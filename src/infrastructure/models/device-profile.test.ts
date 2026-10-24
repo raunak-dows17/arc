@@ -3,6 +3,8 @@ import { describe, it } from "node:test";
 import {
   detectDeviceProfile,
   formatBytes,
+  parseLinuxMemAvailableBytes,
+  parseVmStatAvailableBytes,
   type DeviceProfileOptions,
 } from "./device-profile.js";
 
@@ -52,6 +54,46 @@ describe("device profile", () => {
     );
     assert.equal(profile.tier, "local-capable");
     assert.match(profile.recommendation, /optional/i);
+  });
+
+  it("detects Apple Silicon unified memory", async () => {
+    const profile = await detectDeviceProfile(
+      ".",
+      options({
+        platform: "darwin",
+        arch: "arm64",
+        totalMemory: 16 * 1024 ** 3,
+        freeMemory: 10 * 1024 ** 3,
+        gpu: undefined,
+      }),
+    );
+    assert.equal(profile.gpu?.unifiedMemory, true);
+    assert.equal(profile.gpu?.backend, "metal");
+    assert.equal(profile.tier, "local-capable");
+    assert.match(profile.reasons.join(" "), /unified memory/);
+  });
+
+  it("parses reclaimable macOS vm_stat pages", () => {
+    const sample = [
+      "Mach Virtual Memory Statistics: (page size of 16384 bytes)",
+      "Pages free:                                100.",
+      "Pages inactive:                            200.",
+      "Pages speculative:                          50.",
+      "Pages purgeable:                            25.",
+      "Pages wired down:                          999.",
+      "Pages occupied by compressor:               999.",
+    ].join("\n");
+    assert.equal(parseVmStatAvailableBytes(sample), 375 * 16_384);
+  });
+
+  it("parses Linux MemAvailable", () => {
+    const sample = [
+      "MemTotal:       16384000 kB",
+      "MemFree:         2048000 kB",
+      "MemAvailable:    8192000 kB",
+    ].join("\n");
+    assert.equal(parseLinuxMemAvailableBytes(sample), 8_192_000 * 1_024);
+    assert.equal(parseLinuxMemAvailableBytes("MemTotal: 1 kB"), null);
   });
 
   it("formats unknown and known byte values", () => {
